@@ -1,4 +1,5 @@
 #include "wiz8/local_code/GameplayCode.h"
+#include "wiz8/russian_text.h"
 #include "wiz8/local_code/PC_Item.h"
 #include "wiz8/layouts/character.h"
 #include "wiz8/character_skills.h"
@@ -83,7 +84,8 @@ void AppendSkillIncreaseNoticeText(wchar_t* text, unsigned int* length, int part
     *length += 1;
     text[*length] = L' ';
     *length += 1;
-    swprintf(text + *length, g_format_s_possessive, character->name);
+    /* Mod (Russian translation): it uses the format "%s" instead of "%s's". */
+    swprintf(text + *length, RussianOr(g_format_s_possessive, L"%s"), character->name);
     *length = static_cast<unsigned int>(wcslen(text));
     text[*length] = L' ';
     *length += 1;
@@ -278,13 +280,18 @@ bool CharacterHasTrait(const W8Character* character, W8Trait trait)
     return false;
 }
 
-static float ScaleValueByLevel(unsigned int level, float base)
+/* Found by the w8diff harness: retail 0x005479CE..0x005479EA (fild, fadd st,st,
+   fadd 60.0f, fmul base, fmul 0.01f) returns the product unrounded in st0, and
+   the callers __ftol it straight away. 0.01f is slightly below 0.01, so a
+   product like 900 * 0.01f is 8.9999998 - retail truncates it to 8, while a
+   float return rounded it up to 9.0 first (monk damage resistance, the
+   effective-while-blind senses term). The value is therefore kept in double. */
+static double ScaleValueByLevel(unsigned int level, float base)
 {
     if (level > 0x14) {
         return base;
     }
-    float scaled = (level * 2.0f + 60.0f) * base;
-    return scaled * g_movement_speed_step;
+    return (static_cast<double>(level) * 2.0 + 60.0f) * base * g_movement_speed_step;
 }
 
 /* Scale a trait's flat value by the character's level in their current
@@ -292,13 +299,13 @@ static float ScaleValueByLevel(unsigned int level, float base)
    percent per level in between. The trait id is carried by the call but the
    body never reads it. */
 // FUNCTION: WIZ8 0x005479b0
-float ScaleValueByProfessionLevel(W8Character* character, W8Trait, float base)
+double ScaleValueByProfessionLevel(W8Character* character, W8Trait, float base)
 {
     return ScaleValueByLevel(character->profession_levels[character->iProfession], base);
 }
 
 // FUNCTION: WIZ8 0x00547a00
-float ScaleValueByMonsterLevel(W8MonsterRecord* record, int, float base)
+double ScaleValueByMonsterLevel(W8MonsterRecord* record, int, float base)
 {
     return ScaleValueByLevel(record->effective_level, base);
 }
@@ -320,18 +327,26 @@ void CheatDeathRevive(int party_slot)
                                   character, W8_TRAIT_CHEAT_DEATH, g_float_five)) +
                               7,
                           0, 0, 1);
+    /* Found by the w8diff harness: retail inlines the scale here (0x00547b12, 0x00547b94) on
+       a base still in st0 - the unsigned hit points loaded with fild (times 0.5f in combat) -
+       instead of passing it through a float argument, so hit points above 2^24 keep every
+       bit. With the native 53-bit x87 precision that is exactly double arithmetic. */
+    const unsigned int level = character->profession_levels[character->iProfession];
     if (g_combat_state != 0 && !g_combat_state->characters[party_slot].cheat_death_used) {
+        double scaled =
+            static_cast<unsigned int>(character->uiHPMax) * static_cast<double>(g_float_half);
+        if (level <= 0x14) {
+            scaled = scaled * (static_cast<double>(level) * 2.0 + 60.0f) * g_movement_speed_step;
+        }
         character->hp_current =
-            (Random(static_cast<unsigned int>(ScaleValueByProfessionLevel(
-                 character, W8_TRAIT_CHEAT_DEATH,
-                 static_cast<unsigned int>(character->uiHPMax) * g_float_half))) +
-             0x32) *
-            character->uiHPMax / 100;
+            (Random(static_cast<unsigned int>(scaled)) + 0x32) * character->uiHPMax / 100;
         g_combat_state->characters[party_slot].cheat_death_used = true;
     } else {
-        character->hp_current = Random(static_cast<unsigned int>(ScaleValueByProfessionLevel(
-                                    character, W8_TRAIT_CHEAT_DEATH, character->hp_current))) +
-                                1;
+        double scaled = static_cast<double>(character->hp_current);
+        if (level <= 0x14) {
+            scaled = scaled * (static_cast<double>(level) * 2.0 + 60.0f) * g_movement_speed_step;
+        }
+        character->hp_current = Random(static_cast<unsigned int>(scaled)) + 1;
     }
 }
 
@@ -341,8 +356,11 @@ void CheatDeathRevive(int party_slot)
 int RevealCharacterItemBindingsByProfession(int party_slot, unsigned int target_slot)
 {
     W8Character* character = &g_status.buffers.Char[party_slot];
+    /* The level is shifted unsigned (shr eax,2 at 0x00548e4d); found by the w8diff harness. */
     return RevealCharacterItemBindings(
-        target_slot, (character->profession_levels[character->iProfession] >> 2) + 1, 0);
+        target_slot,
+        (static_cast<unsigned int>(character->profession_levels[character->iProfession]) >> 2) + 1,
+        0);
 }
 
 /* Alchemist auto-brew candidates as {item_id, minimum alchemist profession
@@ -611,8 +629,10 @@ void RefreshCharacterSkillAvailability(W8Character* character)
     for (index = 0; index < 8; ++index) {
         expert_realm_flags[index] = false;
     }
-    for (index = 0; index < 0x72; ++index) {
-        if (character->spell_learned[index + 1] == -1 || character->spell_learned[index + 1] == 2) {
+    /* Retail 0x00553cf6: walks spell ids 1..0x71 (0x71 passes), pairing
+       spell_learned[id] with g_spell_records[id].realm from the same id. */
+    for (index = 1; index <= 0x71; ++index) {
+        if (character->spell_learned[index] == -1 || character->spell_learned[index] == 2) {
             expert_realm_flags[g_spell_records[index].realm] = true;
         }
     }

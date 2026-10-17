@@ -21,8 +21,8 @@ public:
                                               signed char lod) override;
     virtual unsigned int ApplyEmitterSetting(signed char emitter) override;
     virtual W8AniMesh* GetEmitterAniMesh(signed char emitter) override;
-    unsigned char ReadCycleData(W8ReadLevelInfo* info, W8SpellVisual* visual, int,
-                                int emitter_index);
+    unsigned char ReadCycleData(W8ReadLevelInfo* info, W8SpellVisual* visual, int emitter_index,
+                                int);
 
     unsigned int value_0ac;
     unsigned int value_0b0;

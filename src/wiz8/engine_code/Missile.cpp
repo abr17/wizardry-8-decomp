@@ -201,12 +201,21 @@ float AdvanceMissileAI(W8AIMissile* record, srVector3T<float>* out, unsigned int
         *out = representation->location;
         return 0.0f;
     }
-    advance = steps * record->speed_per_step;
+    /* Retail 0x004a50cb..0x004a50ea: steps is loaded as an unsigned 64-bit
+       integer (fild qword); the advance is that exact count times
+       speed_per_step, and the float-rounded count (fst) is what the gravity step
+       below multiplies (found by the w8diff harness). */
+    float step_count = static_cast<float>(steps);
+    advance = static_cast<float>(static_cast<double>(steps) * record->speed_per_step);
     record->missile->GetVelocity(&direction);
     *out = direction;
     position = record->missile->GetPosition();
-    out->Set(position.x + direction.x * advance, position.y + direction.y * advance,
-             position.z + direction.z * advance);
+    /* Retail 0x004a5118..0x004a5179: the x and y offsets are stored to float
+       temporaries before the add, the z offset stays on the FPU stack (found by
+       the w8diff harness). */
+    float offset_x = direction.x * advance;
+    float offset_y = direction.y * advance;
+    out->Set(position.x + offset_x, position.y + offset_y, position.z + direction.z * advance);
     if (g_world->octree != 0 &&
         (entity = g_world->octree->TraceAgainstProps(&position, out, 0, 0)) != 0) {
         record->limit = 1.0f;
@@ -214,26 +223,32 @@ float AdvanceMissileAI(W8AIMissile* record, srVector3T<float>* out, unsigned int
         prop->RunMissileTrigger(record);
     }
     if (record->gravity) {
-        float dx;
-        float dy;
-        float dz;
-
+        /* Retail 0x004a51d7..0x004a51ef: the float step count times the double
+           g_missile_gravity_acceleration, subtracted on the FPU stack and stored
+           once; (float)0.0098 left a different residue (found by the w8diff
+           harness). */
         record->fall_speed =
-            record->fall_speed - steps * static_cast<float>(g_missile_gravity_acceleration);
+            static_cast<float>(record->fall_speed - step_count * g_missile_gravity_acceleration);
         position = record->missile->GetPosition();
-        if (out->y != position.y) {
-            dx = representation->location.x - out->x;
-            dy = representation->location.y - out->y;
-            dz = representation->location.z - out->z;
-            if (sqrtf(dx * dx + dy * dy + dz * dz) != g_float_zero) {
+        /* Retail 0x004a51fa: fcomp; test ah,0x40 - equal or unordered skips. */
+        if (out->y < position.y || out->y > position.y) {
+            /* Retail 0x004a5208..0x004a5234: differences, squares and root stay
+               on the FPU stack and are compared with the double zero; a zero or
+               NaN distance skips the re-aim. */
+            double dx = static_cast<double>(representation->location.x) - out->x;
+            double dy = static_cast<double>(representation->location.y) - out->y;
+            double dz = static_cast<double>(representation->location.z) - out->z;
+            if (sqrt(dz * dz + dy * dy + dx * dx) > g_double_zero) {
                 pitch = GetElevationAngle(&representation->location, out);
                 yaw = GetHeadingAngle(&representation->location, out);
                 missile = record->missile;
                 rotation.SetIdentity();
-                if (yaw != 0.0) {
+                /* Retail 0x004a52db/0x004a531e: fcom 0.0; test ah,0x40 - a zero or
+                   NaN angle is not applied. */
+                if (yaw < 0.0 || yaw > 0.0) {
                     rotation.RotateAboutY(sin(yaw), cos(yaw));
                 }
-                if (pitch != 0.0) {
+                if (pitch < 0.0 || pitch > 0.0) {
                     rotation.RotateAboutX(sin(pitch), cos(pitch));
                 }
                 missile->m_pRep->SetRotation(&rotation);
@@ -329,7 +344,7 @@ void GetCharacterProjectilePosition(unsigned int character_index, srVector3T<flo
 {
     srVector3T<float> camera;
     srMatrix3T<float> rotation;
-    float angle;
+    double angle;
     double cosine;
     double sine;
 
@@ -341,23 +356,34 @@ void GetCharacterProjectilePosition(unsigned int character_index, srVector3T<flo
         position->x = -75.0f;
     }
     rotation.SetIdentity();
-    position->y = g_character_projectile_height -
-                  character_index * g_float_half * g_character_projectile_height_step;
-    angle = GetCameraYawRadians() - g_monster_rotation_offset;
-    if (angle != 0.0) {
+    /* Retail 0x004a57f6..0x004a5878: the index is loaded as an unsigned 64-bit
+       integer and the height is stored once. */
+    position->y = static_cast<float>(g_character_projectile_height -
+                                     static_cast<double>(character_index) * g_float_half *
+                                         g_character_projectile_height_step);
+    /* Retail 0x004a58ab..0x004a58f2: yaw minus the rotation offset stays on the
+       x87 stack for fcos/fsin - it is never rounded to float - and fcom 0.0 /
+       test ah,0x40 skips a zero or NaN angle (found by the w8diff harness). */
+    angle = static_cast<double>(GetCameraYawRadians()) - g_monster_rotation_offset;
+    if (angle < 0.0 || angle > 0.0) {
         cosine = cos(angle);
         sine = sin(angle);
         rotation.RotateAboutY(sine, cosine);
     }
     angle = -GetCameraPitchRadians();
-    if (angle != 0.0) {
+    if (angle < 0.0 || angle > 0.0) {
         cosine = cos(angle);
         sine = sin(angle);
         rotation.RotateAboutX(sine, cosine);
     }
-    position->x = DotProduct(rotation.vectors[0], *position);
-    position->y = DotProduct(rotation.vectors[1], *position);
-    position->z = DotProduct(rotation.vectors[2], *position);
+    /* Retail 0x004A59DB..0x004A5A2C: all three rows dot the ORIGINAL offset;
+       x, y and z are stored back together only afterwards. Row 0 is summed
+       inline as (y + x) + z, rows 1 and 2 through DotProduct (z + y) + x. */
+    srVector3T<float> offset = *position;
+    position->x = rotation.vectors[0].y * offset.y + rotation.vectors[0].x * offset.x +
+                  rotation.vectors[0].z * offset.z;
+    position->y = DotProduct(rotation.vectors[1], offset);
+    position->z = DotProduct(rotation.vectors[2], offset);
     *position += camera;
 }
 

@@ -233,7 +233,7 @@ float GetPartyMovementSpeed(void)
 
 /* Reconcile character turns after the party finishes moving. Characters that
    pass the remaining-movement roll catch up to the combat clock; the rest are
-   marked finished for this round and have their queued portrait event reset. */
+   marked finished for this round and have their queued action cleared. */
 // FUNCTION: WIZ8 0x004f06b0
 void CompletePartyMovementTurns(void)
 {
@@ -264,7 +264,9 @@ void CompletePartyMovementTurns(void)
         }
         combat_row->dead = true;
         combat_row->phase = 0;
-        party_row->pending_event_type = static_cast<unsigned int>(-1);
+        /* Retail 0x004f07bf: writes -1 to XChar[slot]+0x01 (pending_action),
+           not the portrait event field at +0xff. */
+        party_row->pending_action = W8_ACTION_NONE;
     }
     RequestRedraw(
         W8_MAIN_REDRAW_PORTRAIT_0 | W8_MAIN_REDRAW_PORTRAIT_1 | W8_MAIN_REDRAW_PORTRAIT_2 |
@@ -434,7 +436,9 @@ void InterruptActivePartyMovement(void)
         if (row->phase > W8_PHASES_PER_ROUND) {
             row->dead = true;
             row->phase = 0;
-            party_row->pending_event_type = static_cast<unsigned int>(-1);
+            /* Retail 0x004f0a21: writes -1 to XChar[slot]+0x01 (pending_action),
+               not the portrait event field at +0xff. */
+            party_row->pending_action = W8_ACTION_NONE;
             RequestRedraw((1 << party_slot) | W8_MAIN_REDRAW_COMBAT_PROGRESS);
         }
     }
@@ -490,7 +494,9 @@ bool PartyMovementReachedPhaseLimit(void)
     if (!gXStatus.fPartyMovementMode) {
         srAssertFail("gXStatus.fPartyMovementMode", COMBAT_MOVEMENT_CPP, 0x113, 0);
     }
-    if (gXStatus.flPartyMoveDistLimit <= 0.0f) {
+    /* Retail 0x004f011f: test ah,0x41 asserts unless limit > 0 (ordered), so
+       NaN also asserts like retail. */
+    if (!(gXStatus.flPartyMoveDistLimit > 0.0f)) {
         srAssertFail("gXStatus.flPartyMoveDistLimit > 0", COMBAT_MOVEMENT_CPP, 0x114, 0);
     }
     float moved_fraction = gXStatus.party_move_distance / gXStatus.flPartyMoveDistLimit;
@@ -501,5 +507,10 @@ bool PartyMovementReachedPhaseLimit(void)
     unsigned int elapsed_phases =
         g_combat_state->round_counter - g_combat_state->uiPartyActionPhase +
         (g_combat_state->uiCurrentPartyAction != W8_PARTY_ACTION_NONE ? 9 : 0) + 2;
-    return static_cast<float>(elapsed_phases) / remaining_phases <= moved_fraction;
+    /* Retail 0x004f01b1: fcomp; test ah,0x41 returns 0 only when the ratio is
+       ordered-greater, so a NaN compare returns true like retail. Retail
+       0x004f019a loads the unsigned count exactly (fild qword) and divides on
+       the x87 stack, so the ratio is a double, not a float (found by the w8diff
+       harness). */
+    return !(static_cast<double>(elapsed_phases) / remaining_phases > moved_fraction);
 }

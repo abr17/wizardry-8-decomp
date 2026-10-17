@@ -1,4 +1,5 @@
 #include "wiz8/dialog_code/DialogInterface.h"
+#include "wiz8/russian_text.h"
 #include <windows.h>
 #include "vsurface.h"
 #include "wiz8/dialog_code/NpcDialog.h"
@@ -140,7 +141,8 @@ int W8NpcDialog::CreateControls()
         m_text_buffers[0] =
             new W8TextBuffer(&bounds, line, g_wiz_text_font_secondary,
                              g_W8TextBufferAlignMiddle | g_W8TextBufferAlignCenter, 4);
-        swprintf(line, g_format_s_dg, gppStringList[0x7e6], g_status.party_gold);
+        swprintf(line, RussianOr(g_format_s_dg, L"%s %dз"), gppStringList[0x7e6],
+                 g_status.party_gold);
         bounds.left = m_x + 10;
         bounds.top = m_y + 0x37;
         bounds.right = m_x + m_width - 10;

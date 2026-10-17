@@ -129,14 +129,23 @@ static int DrawWrappedTextLine(CHAR16* text, int x, int top, int width, int font
     return 1;
 }
 
+/* Retail DrawWrappedText (0x005d0770) calls 0x005d0590 with its own `dirty`
+   argument as the line's dirty flag and the current section (1, or 2 on the
+   second 0xb3 marker) as the line's alignment flags; its own flags only gate
+   SetFontShadow(0)/(2) around the line (bit 0x20). The port passed
+   `section != 0` as dirty, so every line was first drawn by gprintfDirty with
+   the font's own palette - index 1, the glyph outline, is dark green - before
+   the mono pass, which left a green outline around bubble text (fixed
+   2026-10-12, verified against retail 5d098f..5d09a7 and live). */
 static void RenderWrappedTextLine(CHAR16* text, int x, int top, int width, int font,
-                                  unsigned char foreground, unsigned char background, bool dirty,
-                                  unsigned int flags)
+                                  unsigned char foreground, unsigned char background, int dirty,
+                                  int section, unsigned int flags)
 {
     if (flags & WRAPPED_TEXT_MEASURE_ONLY) {
         SetFontShadow(0);
     }
-    DrawWrappedTextLine(text, x, top, width, font, foreground, background, dirty, flags);
+    DrawWrappedTextLine(text, x, top, width, font, foreground, background, dirty != 0,
+                        static_cast<unsigned short>(section));
     if (flags & WRAPPED_TEXT_MEASURE_ONLY) {
         SetFontShadow(2);
     }
@@ -176,7 +185,7 @@ int DrawWrappedText(int x, int y, unsigned int wrap_width, int line_spacing, int
             if ((wrap_width & 0xffff) < word_width + line_width) {
                 RenderWrappedTextLine(line, draw_x, draw_y, remaining_width, active_font,
                                       active_colour, static_cast<unsigned char>(background),
-                                      section != 0, flags);
+                                      dirty, section, flags);
                 draw_y += GetFontHeight(active_font) + (line_spacing & 0xff);
                 ++line_count;
                 wcscpy(line, word);
@@ -192,7 +201,7 @@ int DrawWrappedText(int x, int y, unsigned int wrap_width, int line_spacing, int
             if (word[0] == L'\n') {
                 RenderWrappedTextLine(line, draw_x, draw_y, remaining_width, active_font,
                                       active_colour, static_cast<unsigned char>(background),
-                                      section != 0, flags);
+                                      dirty, section, flags);
                 draw_y += GetFontHeight(active_font) + (line_spacing & 0xff);
                 ++line_count;
                 memset(line, 0, sizeof(line));
@@ -204,7 +213,7 @@ int DrawWrappedText(int x, int y, unsigned int wrap_width, int line_spacing, int
             } else if (word[0] == 0xb2) {
                 RenderWrappedTextLine(line, draw_x, draw_y, remaining_width, active_font,
                                       active_colour, static_cast<unsigned char>(background),
-                                      section != 0, flags);
+                                      dirty, section, flags);
                 if (alternate) {
                     int span = StringPixLength(line, active_font);
                     remaining_width -= line_width;
@@ -229,7 +238,7 @@ int DrawWrappedText(int x, int y, unsigned int wrap_width, int line_spacing, int
                 if (section == 2) {
                     RenderWrappedTextLine(line, draw_x, draw_y, remaining_width, active_font,
                                           active_colour, static_cast<unsigned char>(background),
-                                          true, flags);
+                                          dirty, 2, flags);
                     section = 1;
                     draw_y += GetFontHeight(active_font) + (line_spacing & 0xff);
                     ++line_count;
@@ -248,7 +257,7 @@ int DrawWrappedText(int x, int y, unsigned int wrap_width, int line_spacing, int
             } else if (word[0] == 0xb4 || word[0] == 0xb5) {
                 RenderWrappedTextLine(line, draw_x, draw_y, remaining_width, active_font,
                                       active_colour, static_cast<unsigned char>(background),
-                                      section != 0, flags);
+                                      dirty, section, flags);
                 if (word[0] == 0xb4 && word[1] != L' ' && word[1] < 0x100) {
                     active_colour = static_cast<unsigned char>(word[1]);
                 }
@@ -269,7 +278,7 @@ int DrawWrappedText(int x, int y, unsigned int wrap_width, int line_spacing, int
         if (ch == L'\0') {
             wcscat(line, &g_empty_wide_string);
             RenderWrappedTextLine(line, draw_x, draw_y, remaining_width, active_font, active_colour,
-                                  static_cast<unsigned char>(background), section != 0, flags);
+                                  static_cast<unsigned char>(background), dirty, section, flags);
             return (GetFontHeight(font) + (line_spacing & 0xff)) * line_count;
         }
     }
@@ -464,9 +473,13 @@ int LayoutPortraitQuoteBubble(int quote_handle, unsigned char background_index,
     int width_px;
     int height_px;
     /* Retail left these unset on the nonzero-background/no-palette path and
-       still consumed them; the recovery keeps that read. */
-    unsigned char colour;
-    bool shadow;
+       still consumed them (an original uninitialised read: retail 0x5cfe82
+       pushes the stack slot that only the plain-background branch writes).
+       Mod fix (2026-10-12): with MSVC 2022 the garbage came out as palette
+       index 1, a dark green outline around every letter. Use white text
+       without a shadow - what the original showed. */
+    unsigned char colour = 0xd0;
+    unsigned char shadow = 0;
     unsigned short count;
     unsigned short x;
     unsigned short y;

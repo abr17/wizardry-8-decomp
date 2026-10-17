@@ -280,11 +280,15 @@ void ClampAttributesToBudget(W8Character* character, W8CharacterCreationState* c
 {
     int index;
 
+    /* Retail tests the wrapped difference (sub eax,ebp / test / jle at 0x00557819), not
+       value > limit: a value far below a positive limit wraps to a positive difference and is
+       clamped to the limit too. Found by the w8diff harness. */
     for (index = 0; index < 7; ++index) {
-        int value = creation_state->attribute_values[index];
-        int limit = creation_state->attribute_limits[index];
-        if (value > limit) {
-            creation_state->attribute_values[index] = value - (value - limit);
+        unsigned int value = static_cast<unsigned int>(creation_state->attribute_values[index]);
+        unsigned int limit = static_cast<unsigned int>(creation_state->attribute_limits[index]);
+        int difference = static_cast<int>(value - limit);
+        if (difference > 0) {
+            creation_state->attribute_values[index] = static_cast<int>(value - difference);
         }
     }
 
@@ -429,7 +433,9 @@ void DetermineEligibleProfessions(W8Character* character, W8CharacterCreationSta
     /* 0x00557416 compares the loop counter against 15 with a signed jump. */
     for (int profession = 0; profession < W8_PROFESSION_COUNT; ++profession) {
         eligibility[profession] = 1;
-        if (profession == character->iProfession) {
+        /* Retail reads only the low word of iProfession (mov dx, word ptr [ecx+0x69] at
+           0x00557367, zero-extended); found by the w8diff harness. */
+        if (profession == static_cast<unsigned short>(character->iProfession)) {
             eligibility[profession] = 1;
         } else if (profession == W8_PROFESSION_VALKYRIE && character->gender != W8_GENDER_FEMALE) {
             eligibility[W8_PROFESSION_VALKYRIE] = 0;

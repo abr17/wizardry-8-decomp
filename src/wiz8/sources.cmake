@@ -43,6 +43,7 @@ set(WIZ8_SOURCE_UNITS
     src/wiz8/local_screens/RCSStatsPage.cpp
     src/wiz8/local_screens/MGSTextBox.cpp
     src/wiz8/local_screens/MainGameScreen.cpp
+    src/wiz8/local_screens/MainGameLayout.cpp
     src/wiz8/local_screens/combat_portrait_image.cpp
     src/wiz8/local_screens/formation_panel_refresh.cpp
     src/wiz8/local_screens/NPCInteractionSubscreen.cpp
@@ -168,6 +169,8 @@ set(WIZ8_SOURCE_UNITS
     src/wiz8/sound_man.cpp
     src/wiz8/surface2d.cpp
     src/wiz8/engine_code/Video2.cpp
+    src/wiz8/engine_code/Canvas.cpp
+    src/wiz8/engine_code/WideArt.cpp
     src/wiz8/character_skills.cpp
     src/wiz8/fact_state.cpp
     src/wiz8/engine_code/MonsterLight.cpp
@@ -216,6 +219,9 @@ set(WIZ8_SOURCE_UNITS
     src/wiz8/npc_script_file.cpp
     src/wiz8/virtual_file_stream.cpp
     src/wiz8/engine_code/trim_string.cpp
+    src/wiz8/russian_text.cpp
+    src/w8diff/w8diff_core.c
+    src/w8diff/w8diff_port.cpp
 )
 
 # Every recovered C++ source must appear exactly once. The glob is

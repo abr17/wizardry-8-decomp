@@ -460,11 +460,17 @@ unsigned char GDCamera::BeginOrientationTransition(float target_pitch, float tar
         m_orientation_flags &= W8_CAMERA_LEVELING;
     }
 
+    /* Retail 0x0047752e: the "goes the other way round" flag (cl) is set only when
+       the distance left after taking off whole turns is folded past the half turn;
+       the yaw velocity sign below uses that flag, not the raw distance, so a target
+       more than a full turn away is not reversed (found by the w8diff harness). */
+    bool folded = false;
     while (m_yaw_distance > g_camera_angle_period) {
         m_yaw_distance -= g_camera_angle_period;
     }
     if (m_yaw_distance > g_camera_half_period) {
         m_yaw_distance = g_camera_angle_period - m_yaw_distance;
+        folded = true;
     }
 
     m_pitch_distance = static_cast<float>(fabs(target_pitch - m_pitch));
@@ -491,8 +497,9 @@ unsigned char GDCamera::BeginOrientationTransition(float target_pitch, float tar
                                     g_camera_transition_duration_factor;
         }
 
-        if ((target_angle < m_yaw && raw_angle_distance <= g_camera_half_period) ||
-            (m_yaw <= target_angle && raw_angle_distance > g_camera_half_period)) {
+        /* Retail 0x00477631..0x00477655: negate when the target is below the yaw
+           (fcomp, test ah,1) and not folded, or above it (test ah,41h) and folded. */
+        if ((target_angle < m_yaw && !folded) || (target_angle > m_yaw && folded)) {
             m_yaw_velocity = -m_yaw_velocity;
         }
         if (target_pitch < m_pitch) {

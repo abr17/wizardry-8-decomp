@@ -213,7 +213,9 @@ void W8CharacterScreen::UpdateDialog()
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored                                                                   \
     "-Wsometimes-uninitialized" // uninit-ok: uncaptured response can use a stale stack byte as acceptance
-            unsigned char accepted;
+            /* msvc2022 port: retail 0x005B0504 stores 1 into this slot before
+               the branch, so an uncaptured response is always accepted. */
+            unsigned char accepted W8_RETAIL_STALE(1);
             if (m_capture_dialog_result) {
                 accepted = static_cast<W8MessageDialogBase*>(m_dialog)->accepted;
                 m_capture_dialog_result = false;
@@ -445,7 +447,8 @@ void W8CharacterScreen::SelectPage(int index)
     int previous = index - 1;
     while (previous >= 0 && !m_page_enabled[previous])
         --previous;
-    m_previous->SetActive(previous != -1);
+    /* Retail 0x005b0e2a: virtual slot 1 (W8TextControl::SetEnabled), so Previous is drawn greyed, not hidden. */
+    m_previous->SetEnabled(previous != -1);
     int next = index + 1;
     while (next < 4 && !m_page_enabled[next])
         ++next;
@@ -609,8 +612,10 @@ void W8CharacterScreen::ShowMessage(wchar_t* text, int confirmation, int respons
     m_dialog_response = response;
     m_dialog = new W8MessageDialogBase;
     if (m_dialog != 0) {
-        m_dialog->SetExtent(0xf0, 0xbe);
-        m_dialog->SetOrigin(0xa0, 100);
+        /* Retail 0x005b1490: SetOrigin(0xf0,0xbe) (slot 6) then SetExtent(0xa0,100) (slot 7),
+           i.e. a 160x100 box centred on (320,240) before SetClientExtent re-centres it. */
+        m_dialog->SetOrigin(0xf0, 0xbe);
+        m_dialog->SetExtent(0xa0, 100);
         m_dialog->SetBackground("Data\\Dialogs\\DialogBackground.sti", 0);
         static_cast<W8MessageDialogBase*>(m_dialog)->SetClientExtent(0xfa, 200);
         static_cast<W8MessageDialogBase*>(m_dialog)->SetMessage(text, 1, 0x32, true, confirmation,

@@ -476,7 +476,7 @@ W8MonsterInfo* MonsterInfoFromID(int caller_line, const char* caller_file, int l
                                  bool assert_on_failure);
 W8MonsterRecord* GetMonsterDataByLocationID(int location_id);
 W8Monster* GetMonsterByLocationID(int location_id);
-float GetMonsterCombatMoveRange(W8MonsterInfo* monster_info);
+double GetMonsterCombatMoveRange(W8MonsterInfo* monster_info); /* x87 result, unrounded */
 void UpdateMonsterDamageAppearance(W8MonsterInfo* monster_info);
 W8MonsterInfo* GetNextMonsterInfo(bool reset_iterator);
 int GetMonsterQuadrant(W8MonsterInfo* monster_info);

@@ -1034,7 +1034,10 @@ bool Trigger::PlayActionSound(const char* sound_name, int volume)
         if (m_pProp == 0) {
             SOUNDPARMS options;
             memset(&options, -1, sizeof(options));
-            options.uiVolume = (g_settings.sound_effects_volume * volume) / 0x7f;
+            /* Retail 0x445820..0x44582f: imul then UNSIGNED /127 (magic 0x2040811), so a
+               negative volume (sound_volume -1) gives a huge value, not 0. */
+            options.uiVolume =
+                static_cast<unsigned int>(g_settings.sound_effects_volume * volume) / 0x7fu;
             SoundPlay((STR)sound_name, &options);
             return false;
         }
@@ -1110,26 +1113,25 @@ void W8TriggerEvent::Update()
             srVector3T<float> source;
             srVector3T<float> target;
             srVector3T<float> transformed;
-            srVector3T<float> axis;
             srMatrix3T<float> rotation;
 
             source = trigger->position;
             target = source;
             target.z += 100.0f;
 
-            axis.Set(0.0, 0.0, 1.0);
-            rotation.vectors[0].Set(trigger->direction.x, trigger->direction.y,
-                                    trigger->direction.z);
-            rotation.vectors[1].Set(1.0, 0.0, 0.0);
-            rotation.vectors[2].Set(0.0, 1.0, 0.0);
+            /* Retail 0x444b67..0x444c6a: identity matrix rotated around a copy of
+               trigger->direction (+0x100), like Run's immediate 0x0c path. */
+            rotation.SetIdentity();
 
-            if (trigger->angle != 0.0f) {
-                rotation.RotateAroundAxis(sin(trigger->angle), cos(trigger->angle), axis);
+            /* fcom 0.0; test ah,0x40; jne: skipped on 0 and on NaN (x87 unordered). */
+            if (trigger->angle < 0.0f || trigger->angle > 0.0f) {
+                rotation.RotateAroundAxis(sin(trigger->angle), cos(trigger->angle),
+                                          trigger->direction);
             }
 
-            transformed.x = DotProduct(rotation.vectors[1], target);
-            transformed.y = DotProduct(rotation.vectors[2], target);
-            transformed.z = DotProduct(axis, target);
+            transformed.x = DotProduct(rotation.vectors[0], target);
+            transformed.y = DotProduct(rotation.vectors[1], target);
+            transformed.z = DotProduct(rotation.vectors[2], target);
             FireMissile(static_cast<unsigned int>(trigger->m_lData1), &source, &transformed, 0, 1,
                         1, 50000.0f);
         }
@@ -1614,6 +1616,8 @@ Trigger* Trigger::CreateAndLoadLevelTrigger(int handle, W8World* world)
         char name[0x80];
         const char* optional_name = 0;
         unsigned char looping = 0;
+        /* Retail 0x44253b zeroes this byte (E+0x2c); it feeds AddAmbientSound arg15. */
+        unsigned char has_position = 0;
         unsigned char shared = 0;
 
         region_center.x = region_center.y = region_center.z = 0.0f;
@@ -1636,9 +1640,8 @@ Trigger* Trigger::CreateAndLoadLevelTrigger(int handle, W8World* world)
         W8AmbientSoundConfig config;
         sprintf(config.wave_name, "data\\sound\\%s", wave);
         if (version > 1) {
-            unsigned char has_position;
             FileRead(handle, &has_position, 1, 0);
-            FileRead(handle, &looping, 1, 0);
+            FileRead(handle, &looping, 1, 0); /* retail E+0x20: read but never used */
         }
         if (version > 2) {
             FileRead(handle, &region_center, sizeof(region_center), 0);
@@ -1658,10 +1661,14 @@ Trigger* Trigger::CreateAndLoadLevelTrigger(int handle, W8World* world)
         region_u *= 500.0f;
         region_v *= 500.0f;
         radius *= 500.0f;
-        AddAmbientSound(world, optional_name, &config, &position, &region_u, &region_v, volume_min,
-                        volume_max, speed_min, speed_max, time_min, time_max, radius,
-                        unbounded == 0, looping, &region_center, region_angle, &region_min,
-                        &region_max, shared);
+        /* Retail 0x442810..0x442828: file ints #5/#6 go to the volume pair, #3/#4 to the
+           time pair, #1/#2 to the speed pair (local names follow read order, not meaning);
+           arg15 is the first version>1 byte (0x44276c). */
+        AddAmbientSound(world, optional_name, &config, &position, &region_u, &region_v,
+                        time_min /* int #5 */, time_max /* int #6 */, speed_min /* int #3 */,
+                        speed_max /* int #4 */, volume_min /* int #1 */,
+                        volume_max /* int #2 */, radius, unbounded == 0, has_position,
+                        &region_center, region_angle, &region_min, &region_max, shared);
         return 0;
     }
 
@@ -1681,7 +1688,6 @@ Trigger* Trigger::CreateAndLoadLevelTrigger(int handle, W8World* world)
         unsigned char searchable;
         char location_variable[0x100];
         unsigned char consume_item;
-        int action_value;
         unsigned char animate_action;
         char sound[0x80];
         float representation_scale = 1.0f;
@@ -1705,7 +1711,8 @@ Trigger* Trigger::CreateAndLoadLevelTrigger(int handle, W8World* world)
         FileRead(handle, &searchable, 1, 0);
         FileRead(handle, location_variable, sizeof(location_variable), 0);
         FileRead(handle, &consume_item, 1, 0);
-        FileRead(handle, &action_value, 4, 0);
+        /* Retail 0x442984: lea ecx,[ebx+0xac] - read straight into Trigger::action_value. */
+        FileRead(handle, &trigger->action_value, 4, 0);
         FileRead(handle, &animate_action, 1, 0);
         FileRead(handle, sound, sizeof(sound), 0);
         sprintf(trigger->action_data, "data\\sound\\%s", sound);
@@ -2305,10 +2312,11 @@ void Trigger::RunDestination(const char* destination)
     srVector3T<float> destination_direction;
     srVector3T<float> source_position;
     srMatrix3T<float> rotation;
-    /* Retail's named-entity path reads saved storage for these integers;
-       authored initialization remains unresolved. */
-    int location_id;
-    int entrance;
+    /* Retail 0x440e20/0x440e24: on the named-entity path both integers are loaded from
+       the stack slot holding the saved 'this', so the level never matches and
+       RequestLevelTransition(this, this, flag) runs. The not-found path overwrites both. */
+    int location_id = reinterpret_cast<int>(this); // reinterpret-ok: retail saved-'this' slot
+    int entrance = location_id;
     int current_location;
     float angle;
     bool named_entity;
@@ -2352,7 +2360,8 @@ void Trigger::RunDestination(const char* destination)
     }
 
     source_position.Set(position.x, position.y, position.z);
-    g_octree->AdjustPortalDestination(&destination_position, &source_position);
+    /* Retail 0x440fc7..0x440fdf: arg1 = copy of this->position, arg2 = destination. */
+    g_octree->AdjustPortalDestination(&source_position, &destination_position);
     SetWorldScenePosition(GetWorld(), &destination_position);
 
     rotation.SetIdentity();
@@ -2694,7 +2703,8 @@ void Trigger::Run(int source)
         case 8: {
             signed char previous = static_cast<signed char>(state_index);
 
-            if (state_count > 1) {
+            /* Retail 0x0043E40E: cmp cl,1; jle - signed byte compare, counts 0x80..0xff skip. */
+            if (static_cast<signed char>(state_count) > 1) {
                 signed char next = static_cast<signed char>(state_index) +
                                    static_cast<signed char>(state_direction);
                 state_index = static_cast<unsigned char>(next);
@@ -3193,8 +3203,10 @@ void Trigger::Run(int source)
             target_position.z += 100.0f;
             rotation.SetIdentity();
             /* Retail rotates the identity matrix around the trigger's direction
-               field (ebp+0x100), not around identity Z. */
-            if (angle != 0.0f) {
+               field (ebp+0x100), not around identity Z.
+               Retail 0x0043f8fc/0x0043f92e: fcom 0.0; test ah,0x40; jne - skipped when the
+               angle equals 0 or is NaN (x87 unordered), hence not written as != 0. */
+            if (angle < 0.0f || angle > 0.0f) {
                 rotation.RotateAroundAxis(sin(angle), cos(angle), direction);
             }
             transformed = rotation.Transform(target_position);
@@ -3413,6 +3425,7 @@ void Trigger::Run(int source)
 
     case 0x4b: {
         char* recipient;
+        const char* destination = 0;
         unsigned char count = 0;
         unsigned char selected;
         unsigned char index = 0;
@@ -3425,16 +3438,21 @@ void Trigger::Run(int source)
             NextTriggerRecipient(&recipient);
             ++count;
         }
-        selected = static_cast<unsigned char>(GetTickCount() % count);
+        /* Retail 0x44073a: movsx ecx,count; xor edx,edx; div ecx - the byte count is
+           sign-extended, so 128..255 recipients give a huge unsigned divisor. */
+        selected = static_cast<unsigned char>(
+            GetTickCount() % static_cast<unsigned int>(static_cast<signed char>(count)));
         recipient = m_pacRecipients;
-        do {
+        while (recipient != 0) {
             NextTriggerRecipient(&recipient);
             if (index == selected) {
+                destination = g_trigger_parse_buffer;
                 break;
             }
             ++index;
-        } while (recipient != 0);
-        RunDestination(g_trigger_parse_buffer);
+        }
+        /* Retail 0x4407c3: a walk that runs out before index == selected passes NULL. */
+        RunDestination(destination);
         break;
     }
 

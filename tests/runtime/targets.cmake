@@ -44,6 +44,16 @@ if(NOT WIZ8_ANALYSIS_BUILD)
         "${PROJECT_SOURCE_DIR}/tests/runtime/wiz8_crash_report.cpp"
     )
     wiz8_configure_executable(WIZ8_RUNTIME Wiz8Runtime)
+    if(WIZ8_MODERN_MSVC)
+        # msvc2022 port: only the game image is built; the console test harness
+        # (WIZ8_RUNTIME_TEST) needs the reconstructed SURRENDER target.
+        target_sources(WIZ8_RUNTIME PRIVATE ${WIZ8_MODERN_MSVC_EXTRA_SOURCES})
+        target_link_options(WIZ8_RUNTIME PRIVATE ${WIZ8_MODERN_MSVC_LINK_OPTIONS}
+            /FIXED /BASE:0x400000
+            /STACK:0x100000,0x1000 /HEAP:0x100000,0x1000
+            "/MAP:${CMAKE_BINARY_DIR}/Wiz8Runtime.map")
+        return()
+    endif()
     target_link_options(WIZ8_RUNTIME PRIVATE
         /DEBUG /DEBUGTYPE:CV /PDBTYPE:SEPT /INCREMENTAL:NO /OPT:REF /OPT:NOICF /FIXED
         /BASE:0x400000 /FILEALIGN:0x1000

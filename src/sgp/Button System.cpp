@@ -1054,6 +1054,25 @@ void ResizeButton(INT32 iButtonID, INT16 w, INT16 h)
     b->uiFlags |= BUTTON_DIRTY;
 }
 
+/* Wide canvas layout A (2026-10-11): which canvas edge the button sticks to
+   (W8LayoutAnchor). Both the hit test (mousesystem) and drawing
+   (DrawButtonFromPtr) honour it; it does nothing while the layout is off. */
+void SetButtonLayoutAnchor(INT32 iButtonID, INT32 iAnchor)
+{
+    if (iButtonID < 0 || iButtonID >= MAX_BUTTONS || ButtonList[iButtonID] == NULL) {
+        return;
+    }
+    ButtonList[iButtonID]->Area.bLayoutAnchor = (INT8)iAnchor;
+}
+
+INT32 GetButtonLayoutAnchor(INT32 iButtonID)
+{
+    if (iButtonID < 0 || iButtonID >= MAX_BUTTONS || ButtonList[iButtonID] == NULL) {
+        return W8_ANCHOR_CENTER;
+    }
+    return ButtonList[iButtonID]->Area.bLayoutAnchor;
+}
+
 //	SetButtonPosition
 //	Sets the position of a button on the screen. The position is relative
 //	to the top left corner of the button.
@@ -1754,6 +1773,10 @@ BOOLEAN DrawButton(INT32 iButtonID)
 void DrawButtonFromPtr(GUI_BUTTON* b)
 {
     Assert(b);
+    /* Wide canvas layout A: a button anchored to a canvas edge (roof, bottom
+       bar, layout arrows) keeps its 640-space position; only the 2D draw
+       origin moves while it is drawn. */
+    CanvasDrawScope layout_scope(b->Area.bLayoutAnchor);
     // Draw the appropriate button according to button type
     gbDisabledButtonStyle = DISABLED_STYLE_NONE;
     switch (b->uiFlags & BUTTON_TYPES) {

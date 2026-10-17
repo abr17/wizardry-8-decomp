@@ -55,10 +55,14 @@ bool W8NavigatorAttachment::TruncatePathAtRadius(const srVector3T<float>* target
 {
     unsigned int index = path_cursor;
     float distance = (path_positions[index] - *target).Length();
-    /* Retail leaves this slot cold when path_positions[path_cursor] is already
-       outside the radius, so the interpolation below reads whatever occupied
-       the stack. Preserved intentionally. */
+    /* Retail 0x0045671B: previous_distance lives in the `target` argument slot
+       (only the loop stores it). When path_positions[path_cursor] is already
+       outside the radius, 0x00456798 reads the pointer's bits as a float -- a
+       tiny/denormal value for any user-mode address, so the cut is effectively
+       (distance - radius) / distance. */
+    static_assert(sizeof(target) == sizeof(float), "Win32 pointer-as-float slot");
     float previous_distance;
+    memcpy(&previous_distance, &target, sizeof(previous_distance));
 
     if (distance < radius) {
         do {
@@ -991,10 +995,14 @@ srVector3T<float>* W8Navigator::AdjustPosition(srVector3T<float>* result,
         *result = *current;
         return result;
     }
-    /* 0x0045445D skips the whole settle-and-drop body when navigation_mode is
-       4 and falls into the shared stop path below, so the mode test guards the
-       body rather than sharing the location-id early return. */
-    if (navigation_mode != 4) {
+    /* 0x0045447E..0x00454488: navigation_mode 4 jumps to the copy-out at
+       0x00454571 with EDX = current, i.e. returns *current untouched (no stop,
+       no velocity reset). */
+    if (navigation_mode == 4) {
+        *result = *current;
+        return result;
+    }
+    {
         srVector3T<float> probe = *current;
         probe.y += g_world_scale;
         bool hit;
@@ -1161,10 +1169,12 @@ int W8Navigator::FindNavigatorPathDistance(float max_range, float* out_distance)
     double distance = MeasurePathDistance(&g_startup_world->movement.position, max_range, 0);
 
     *out_distance = static_cast<float>(distance);
-    if (distance != g_negative_one) {
-        return 1;
+    /* Retail fcomp [-1.0f]; test ah,0x40; jne -> 0: C3 is also set for an
+       unordered compare, so a NaN distance reports "no path" too. */
+    if (distance == g_negative_one || distance != distance) {
+        return 0;
     }
-    return 0;
+    return 1;
 }
 
 // FUNCTION: WIZ8 0x00453520
@@ -2192,7 +2202,22 @@ void W8Navigator::UpdateNavigation(unsigned char skip_movement, bool slowed)
                 minimum_speed = g_navigator_minimum_speed;
             }
             movement.movement_speed = velocity.Length() / (movement.movement_scale * g_world_scale);
-            if (movement.movement_speed < minimum_speed) {
+            /* Retail 0x00455BAF..0x00455BBC: FCOMP + TEST AH,1 takes the branch
+               when C0 is set - for "less" and for an unordered (NaN) result.
+               On a frame with no game time (resting) velocity.y is 0/0 = NaN;
+               retail then stores the minimum speed. A plain `<` keeps the NaN,
+               and W8GrCycle::TickAnimation turns a NaN rate into 2^32 frames
+               (the game hangs on rest). */
+            if (!(movement.movement_speed >= minimum_speed)) {
+                movement.movement_speed = minimum_speed;
+            }
+            /* Mod (robustness): a frame with no game time, but the height
+               was adjusted (snapping to the ground) - dy/0 = infinity, and
+               TickAnimation spun 2^31 frames (hang at camp, when
+               monsters start moving again). The original would hang in this case too;
+               with dy = 0 it sets the minimum speed - we always do that. */
+            if (g_game_time_accumulator->GetFrameDelta() == g_float_zero ||
+                !(movement.movement_speed < 3.0e38f)) {
                 movement.movement_speed = minimum_speed;
             }
         }

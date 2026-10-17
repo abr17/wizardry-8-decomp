@@ -1759,17 +1759,20 @@ unsigned int ChooseSpellPowerLevelForTarget(int party_slot, int spell_id, int id
 {
     W8Character* caster = &g_status.buffers.Char[party_slot];
     W8PartySlotRow* row = &g_status.buffers.XChar[party_slot];
+    /* Retail 0x004FE4B2: reads the slot's active target at XChar+0x1d, not
+       spell_target (+0x81), which SetPartySlotSpell only writes after the cast. */
+    const W8CombatSlot* aim = &row->target_out_of_combat;
     const unsigned int* conditions = 0;
     const W8Character* target_character = 0;
     unsigned int power_level;
     unsigned int worst;
 
-    if (row->spell_target.iType == W8_TARGET_KIND_CHARACTER) {
-        target_character = &g_status.buffers.Char[row->spell_target.iChar];
+    if (aim->iType == W8_TARGET_KIND_CHARACTER) {
+        target_character = &g_status.buffers.Char[aim->iChar];
         conditions = target_character->uiCondition;
-    } else if (row->spell_target.iType == W8_TARGET_KIND_MONSTER) {
+    } else if (aim->iType == W8_TARGET_KIND_MONSTER) {
         W8MonsterInfo* monster_info =
-            MonsterInfoFromID(0xb83, MAGIC_CPP, row->spell_target.iMonsterID, true);
+            MonsterInfoFromID(0xb83, MAGIC_CPP, aim->iMonsterID, true);
         conditions = monster_info->uiCondition;
     }
 
@@ -1822,9 +1825,9 @@ unsigned int ChooseSpellPowerLevelForTarget(int party_slot, int spell_id, int id
             /* The one case where the target being a character says something
                the condition does not: the item they are carrying asks for more
                than the condition does. */
-            if (row->spell_target.iType == W8_TARGET_KIND_CHARACTER &&
-                power_level <= GetEquipmentBindingDifficulty(row->spell_target.iChar)) {
-                power_level = GetEquipmentBindingDifficulty(row->spell_target.iChar);
+            if (aim->iType == W8_TARGET_KIND_CHARACTER &&
+                power_level <= GetEquipmentBindingDifficulty(aim->iChar)) {
+                power_level = GetEquipmentBindingDifficulty(aim->iChar);
             }
             break;
         default:
@@ -1843,7 +1846,7 @@ unsigned int ChooseSpellPowerLevelForTarget(int party_slot, int spell_id, int id
         if (spell_id != W8_SPELL_IDENTIFY_ITEM) {
             return 1;
         }
-        power_level = CountIdentifyAttemptsNeeded(row->spell_target.pPCItem, identify_context);
+        power_level = CountIdentifyAttemptsNeeded(aim->pPCItem, identify_context);
         break;
 
     default:
@@ -1876,9 +1879,11 @@ unsigned short g_name_prefix_messages[15] = {
 };
 /* Say in words what a spell is aimed at. A character or a monster whose name
    the party does not have is described by its name prefix instead. Everything
-   else is a fixed word. */
+   else is a fixed word. Named apart from Combat Attack's SpellTargetString
+   (0x00546b40, no "at" wrapper): with both in scope, overload resolution sent
+   the cast notices there and they read "casts Heal WoundsKisa". */
 // FUNCTION: WIZ8 0x004f97a0
-wchar_t* SpellTargetString(const W8TargetSource* source, const W8CombatSlot* target)
+wchar_t* SpellAimString(const W8TargetSource* source, const W8CombatSlot* target)
 {
     unsigned short name_prefix;
 
@@ -1977,12 +1982,12 @@ unsigned int MonsterCastsSpell(W8MonsterInfo* monster_info, int spell_id, unsign
     if (g_settings.verbose_combat_messages == 0) {
         ShowNoticef(W8_FONT_PALETTE_RUST, gppStringList[W8_MESSAGE_MONSTER_CAST / 4],
                     GetMonsterName(monster_info, record, 0), g_spell_records[spell_id].display_name,
-                    SpellTargetString(&source, &monster_info->Target));
+                    SpellAimString(&source, &monster_info->Target));
         SetTextBoxMode(1, 9);
     } else {
         ShowNoticef(W8_FONT_PALETTE_RUST, gppStringList[W8_MESSAGE_MONSTER_CAST_VERBOSE / 4],
                     GetMonsterName(monster_info, record, 0), g_spell_records[spell_id].display_name,
-                    power_level, SpellTargetString(&source, &monster_info->Target));
+                    power_level, SpellAimString(&source, &monster_info->Target));
     }
 
     record = GetMonsterDataForInfo(monster_info);
@@ -2086,6 +2091,12 @@ void ReportSpellResult(W8SpellEffectEntry* effect)
                                 gppStringList[g_condition_notices[condition].singular]),
                             -1);
                     }
+                } else {
+                    /* Retail 0x00500748: any other target kind posts "<count> <singular>". */
+                    AppendToLastTextLine(
+                        FormatWideString(L"%ld %s", effect->result.condition_counts[condition],
+                                         gppStringList[g_condition_notices[condition].singular]),
+                        -1);
                 }
             } else {
                 AppendToLastTextLine(
@@ -2188,6 +2199,19 @@ static bool CheckAndRestartSpellCooldown(int spell_id)
     return affected;
 }
 
+/* Found by the w8diff harness: every "is the running effect at most a quarter
+   through" test in SpellAffectedTarget (retail 0x004F9BB2, 0x004F9C36, 0x004F9CCA,
+   0x004F9D32) loads the unsigned turns through a zeroed high dword (fild qword),
+   divides by the duration as a signed dword (fidiv dword) and keeps the target
+   unless the x87 quotient compares above 0.25f (fcomp / test ah,0x41 / jne). So a
+   duration past 0x7fffffff divides as a negative number and a zero one gives
+   0/0 = NaN, which compares unordered and keeps the target. */
+static bool EffectTurnsAtMostQuarter(unsigned int turns, unsigned int duration)
+{
+    double ratio = static_cast<double>(turns) / static_cast<int>(duration);
+    return !(ratio > g_navigator_vertical_phase_step);
+}
+
 /* Whether the spell's current target would actually be affected by it - the
    per-spell rules the cast path checks before it spends the points. */
 // FUNCTION: WIZ8 0x004F9AE0
@@ -2219,8 +2243,7 @@ bool SpellAffectedTarget(W8Character* character, int spell_id, W8CombatSlot* aim
             for (index = 0; index < 12; ++index) {
                 if (g_being_effect_slot_spells[index] == spell_id) {
                     affected =
-                        g_status.effect_slots[index].duration / static_cast<float>(duration) <=
-                        g_navigator_vertical_phase_step;
+                        EffectTurnsAtMostQuarter(g_status.effect_slots[index].duration, duration);
                     break;
                 }
             }
@@ -2233,9 +2256,8 @@ bool SpellAffectedTarget(W8Character* character, int spell_id, W8CombatSlot* aim
         if (gXStatus.fCombatMode && gXStatus.hostile_monster_count > 0) {
             for (index = 0; index < 9; ++index) {
                 if (g_combat_effect_slot_spells_and_cast_success[index] == spell_id) {
-                    affected = g_combat_state->effect_slots0[index].duration /
-                                   static_cast<float>(duration) <=
-                               g_navigator_vertical_phase_step;
+                    affected = EffectTurnsAtMostQuarter(
+                        g_combat_state->effect_slots0[index].duration, duration);
                     break;
                 }
             }
@@ -2257,8 +2279,7 @@ bool SpellAffectedTarget(W8Character* character, int spell_id, W8CombatSlot* aim
                 enchantments = monster_info->enchantments;
             }
             W8EnchantmentSlot enchantment = GetConditionDisplaySlot(spell_id);
-            affected = enchantments[enchantment].turns / static_cast<float>(duration) <=
-                       g_navigator_vertical_phase_step;
+            affected = EffectTurnsAtMostQuarter(enchantments[enchantment].turns, duration);
             break;
         }
         affected = false;
@@ -2270,10 +2291,17 @@ bool SpellAffectedTarget(W8Character* character, int spell_id, W8CombatSlot* aim
             }
             affected = false;
             for (index = 0; index < 8; ++index) {
+                /* Found by the w8diff harness: retail 0x004F9D18..0x004F9D57 starts at
+                   Char[0] + 0xaa9 (enchantments[HASTE].turns) and steps the pointer by
+                   0x186e - one character plus one enchantment slot - so slot N reads
+                   the dword at enchantments[HASTE + N].turns of its own character,
+                   running past the eight slots from N = 3 on. */
+                const unsigned int* turns = reinterpret_cast<const unsigned int*>(
+                    reinterpret_cast<const unsigned char*>(
+                        &g_status.buffers.Char[index].enchantments[W8_ENCHANTMENT_HASTE].turns) +
+                    index * sizeof(W8Enchantment));
                 if (g_status.buffers.XChar[index].fOccupied &&
-                    g_status.buffers.Char[index].enchantments[W8_ENCHANTMENT_RAZOR_CLOAK].turns /
-                            static_cast<float>(duration) <=
-                        g_navigator_vertical_phase_step) {
+                    EffectTurnsAtMostQuarter(*turns, duration)) {
                     affected = true;
                 }
             }
@@ -2297,8 +2325,10 @@ bool SpellAffectedTarget(W8Character* character, int spell_id, W8CombatSlot* aim
     case W8_SPELL_HEAL_ALL:
         for (index = 0; index < 8; ++index) {
             target = &g_status.buffers.Char[index];
+            /* Found by the w8diff harness: retail 0x004F9DFE is cmp [..],0x13 / jae
+               (unsigned), so 0x80000000 / 0xffffffff do not count as alive. */
             if (g_status.buffers.XChar[index].fOccupied &&
-                target->highest_condition <= W8_CONDITION_DEAD &&
+                static_cast<unsigned int>(target->highest_condition) <= W8_CONDITION_DEAD &&
                 target->hp_current < static_cast<unsigned int>(target->uiHPMax)) {
                 return true;
             }
@@ -2320,8 +2350,10 @@ bool SpellAffectedTarget(W8Character* character, int spell_id, W8CombatSlot* aim
         if (gXStatus.fCombatMode) {
             for (index = 0; index < 8; ++index) {
                 target = &g_status.buffers.Char[index];
+                /* Found by the w8diff harness: retail 0x004F9ED8 is cmp [..],0x13 / jae
+                   (unsigned), like Heal All above. */
                 if (g_status.buffers.XChar[index].fOccupied &&
-                    target->highest_condition <= W8_CONDITION_DEAD &&
+                    static_cast<unsigned int>(target->highest_condition) <= W8_CONDITION_DEAD &&
                     static_cast<unsigned int>(target->stamina) <
                         static_cast<unsigned int>(target->uiStaminaMax)) {
                     return true;
@@ -2589,7 +2621,7 @@ int ExecuteCharacterSpellCast(int party_slot, int spell_id, unsigned int power_l
     if (g_settings.verbose_combat_messages == 0) {
         if (!continue_cast) {
             PostCharacterNotice(party_slot, gppStringList[0x18c], record->display_name,
-                                SpellTargetString(&source, aim));
+                                SpellAimString(&source, aim));
             SetTextBoxMode(1, 8);
         } else {
             PostCharacterNotice(party_slot, gppStringList[0x18d]);
@@ -2597,7 +2629,7 @@ int ExecuteCharacterSpellCast(int party_slot, int spell_id, unsigned int power_l
         }
     } else {
         PostCharacterNotice(party_slot, gppStringList[0x18b], record->display_name, power_level,
-                            SpellTargetString(&source, aim));
+                            SpellAimString(&source, aim));
     }
     best_skill = GetBestSpellbookSkillForSpell(character, spell_id, true, true, power_level);
     realm_skill = static_cast<W8Skill>(realm + 0x1c);
@@ -3202,12 +3234,14 @@ int CastSpellFromSource(int spell_id, W8TargetSource* source, W8CombatSlot* targ
         *out_power = power_level;
     }
     if (fizzled) {
-        if (TargetSourceIsMonster(&owner->Source, 0)) {
-            if (owner->Source.iMonsterID == -1) {
+        /* Retail 0x004FCE43: tests OrigSource (+0x08, copied from *source at entry);
+           Source (+0x5c) is never filled on the fizzle path. */
+        if (TargetSourceIsMonster(&owner->OrigSource, 0)) {
+            if (owner->OrigSource.iMonsterID == -1) {
                 srAssertFail("pOrigSource->iMonsterID != -1", MAGIC_CPP, 0x1504, 0);
             }
             monster_index =
-                MonsterGetIndexByLocationID(0x1505, MAGIC_CPP, owner->Source.iMonsterID, true);
+                MonsterGetIndexByLocationID(0x1505, MAGIC_CPP, owner->OrigSource.iMonsterID, true);
             monster_info = MonsterGetScriptPartByLocationIndex(monster_index);
             if (gXStatus.fCombatMode && g_combat_state->eCombatActionStatus != 0 &&
                 g_combat_state->pActionMonsterInfo != 0 &&
@@ -3522,8 +3556,8 @@ void ScatterSpellPointTarget(int spell_id, W8TargetSource* source, W8CombatSlot*
 }
 
 /* The once-per-cast backfire roll for a spell whose source is under the
-   confusion condition: a trait save can skip it, then roughly one cast in
-   five has its target re-picked at random or scattered to a random point,
+   blind condition: a trait save can skip it, then four casts in five have
+   their target re-picked at random or scattered to a random point,
    with a notice to whoever the source is. */
 // FUNCTION: WIZ8 0x004FF220
 void CheckSpellBackfire(int spell_id, W8TargetSource* source, W8CombatSlot* target)
@@ -3560,7 +3594,8 @@ void CheckSpellBackfire(int spell_id, W8TargetSource* source, W8CombatSlot* targ
             return;
         }
     }
-    if (0x13 < Random(100)) {
+    /* Retail 0x004FF2EE: cmp eax,0x14 / jb ret - only rolls 20..99 redirect. */
+    if (Random(100) < 0x14) {
         return;
     }
     target_type = GetSpellTargetType(spell_id, false);
@@ -3771,6 +3806,9 @@ void PopulateSpellTargetMarkers(int spell_id, int power_level, W8TargetSource* s
             }
         } else if (target->iType == W8_TARGET_KIND_PARTY) {
             marked = true;
+            /* Retail 0x004FD524: side shares spell_id's stack slot ([esp+0x7c]) and this
+               path never writes it; the party loop compares its low byte with 3. */
+            side = spell_id;
         } else {
             FormatDebugMessage(1,
                                "InvalidMagicTarget: Spell %d(%ls), Target Type %d(char %d, monster "
@@ -3806,6 +3844,9 @@ void PopulateSpellTargetMarkers(int spell_id, int power_level, W8TargetSource* s
                 return;
             }
         } else {
+            /* Retail 0x004FD69B..0x004FD749: only this branch runs the party range
+               check, and a non-friendly monster's backfire (side 1) skips it. */
+            bool check_party = true;
             side = 3;
             if (source->fBackfire || source->fReflection) {
                 if (source->iChar != -1) {
@@ -3814,16 +3855,18 @@ void PopulateSpellTargetMarkers(int spell_id, int power_level, W8TargetSource* s
                     if (MonsterInfoFromID(0x9f3, MAGIC_CPP, source->iMonsterID, true)
                             ->ubDisposition != W8_DISPOSITION_FRIENDLY) {
                         side = 1;
+                        check_party = false;
                     } else {
                         side = 2;
                     }
                 }
             }
-        }
-        if (!marked &&
-            TargetInRangeAndArcs(&camera, g_startup_world->radius, &eye, 0, heading, elevation) &&
-            g_octree->TraceLineOfSight(&eye, &camera, true, -3, -3, true, 0) == 0) {
-            marked = true;
+            if (check_party &&
+                TargetInRangeAndArcs(&camera, g_startup_world->radius, &eye, 0, heading,
+                                     elevation) &&
+                g_octree->TraceLineOfSight(&eye, &camera, true, -3, -3, true, 0) == 0) {
+                marked = true;
+            }
         }
         CollectConeMonsterTargets(source, &eye, heading, elevation, monster_markers,
                                   static_cast<unsigned char>(side), sight_flag);
@@ -3840,11 +3883,17 @@ void PopulateSpellTargetMarkers(int spell_id, int power_level, W8TargetSource* s
         radius = (g_spell_records[spell_id].radius_per_level * power_level +
                   g_spell_records[spell_id].effect_radius) *
                  g_world_scale;
+        /* Retail 0x004FDA77..0x004FDAC7: a character or friendly monster aims at
+           hostiles (side 1) unless backfired/reflected; only a hostile caster is the
+           other way round. */
         if (TargetSourceIsCharacter(source, 1)) {
-            side = (source->fBackfire || source->fReflection) ? 1 : 2;
+            side = (source->fBackfire || source->fReflection) ? 2 : 1;
         } else if (TargetSourceIsMonster(source, 1)) {
-            if (monster_info->ubDisposition != W8_DISPOSITION_FRIENDLY &&
-                monster_info->ubDisposition != W8_DISPOSITION_HOSTILE) {
+            if (monster_info->ubDisposition == W8_DISPOSITION_FRIENDLY) {
+                side = (source->fBackfire || source->fReflection) ? 2 : 1;
+            } else if (monster_info->ubDisposition == W8_DISPOSITION_HOSTILE) {
+                side = (source->fBackfire || source->fReflection) ? 1 : 2;
+            } else {
                 FormatDebugMessage(1,
                                    "InvalidMagicSource: Spell %d(%ls), Target Type %d(char %d, "
                                    "monster ID %d, group ID %d), Source Type %d(char %d,ID %d)",
@@ -3853,7 +3902,6 @@ void PopulateSpellTargetMarkers(int spell_id, int power_level, W8TargetSource* s
                                    source->iType, source->iChar, source->iMonsterID);
                 return;
             }
-            side = (source->fBackfire || source->fReflection) ? 1 : 2;
         } else {
             side = 3;
         }

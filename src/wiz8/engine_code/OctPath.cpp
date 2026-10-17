@@ -2218,6 +2218,10 @@ unsigned short W8PathingService::PlanMovement(W8NavigatorMovementState* movement
         unsigned short current_x = current->cell_x;
         unsigned short current_z = current->cell_z;
         unsigned int current_height = current->path_height;
+        /* Retail 0x004639A6 seeds the height in/out slot once per expanded
+           node; ResolvePathCell writes each matched height back, so later
+           directions compare against the last resolved neighbour. */
+        unsigned int height = current_height;
 
         for (int direction = 0; direction < 8; ++direction) {
             current = &m_search_nodes[best_node];
@@ -2269,7 +2273,6 @@ unsigned short W8PathingService::PlanMovement(W8NavigatorMovementState* movement
                 continue;
             }
 
-            unsigned int height = current_height;
             float clearance = radius;
             float vertical = base_score;
             bool dynamic = false;
@@ -2357,7 +2360,10 @@ unsigned short W8PathingService::PlanMovement(W8NavigatorMovementState* movement
 
     bool direct_path = false;
     unsigned short direct_visibility_node = 0;
-    if (m_probe_cell_key != 0) {
+    /* Retail 0x0046402D..0x0046404A runs the walk for any selected node once
+       past the (probe 0, result 0) exit - also node 0 when the distance stop
+       fired on a collision-2 node - and traces from it (0x004642AE). */
+    if (m_probe_cell_key != 0 || result != 0) {
         unsigned short walk = static_cast<unsigned short>(m_probe_cell_key);
         unsigned short walk_parent = m_search_nodes[walk].parent_node;
         while (walk_parent != 0) {
@@ -2387,7 +2393,7 @@ unsigned short W8PathingService::PlanMovement(W8NavigatorMovementState* movement
         attachment->path_positions[attachment->path_position_index] = movement->position;
         attachment->path_destination = attachment->path_positions[attachment->path_position_index];
         g_octree->RegisterNavigatorCell(movement->location_id, &movement->position);
-        g_startup_world->radius = g_startup_world->movement.alternate_radius;
+        g_startup_world->radius = g_startup_world->movement.collision_radius; /* retail +0x170 */
         attachment->flags &= ~W8_NAV_ATTACHMENT_RESULT_MASK;
         if (search_visualization && m_path_visualization != 0) {
             BuildSearchVisualization();
@@ -2459,14 +2465,22 @@ unsigned short W8PathingService::PlanMovement(W8NavigatorMovementState* movement
             m_probe_cell_key = route_node;
             break;
         }
-        if (route_node == 0 || m_search_nodes[route_node].path_cost > remaining_callback) {
-            continue;
+        /* 0x00464701..0x00464728: retail compares the NEXT node's cost (node 0
+           is the zeroed sentinel once the chain ends) with the turn's remaining
+           movement and stops at route_node only when the route would overrun
+           it; a NaN compare keeps walking. The port tested route_node with the
+           sense inverted, so every combat route stopped after its first node. */
+        if (m_search_nodes[route_parent].path_cost > remaining_callback) {
+            m_probe_cell_key = route_node;
+            break;
         }
-        m_probe_cell_key = route_node;
-        break;
     }
 
-    attachment->AppendPathPosition(&m_search_nodes[anchor_node].position, 0);
+    /* 0x0046473A: retail appends the last route node ([esp+0x10]), not the
+       line-of-sight anchor ([esp+0x40]). With the anchor, an open-ground route
+       (every node visible from the start) ended at the start cell: monsters
+       played their walk and never moved. */
+    attachment->AppendPathPosition(&m_search_nodes[route_node].position, 0);
     attachment->path_values[prop_count] = 0;
 
     if (attachment->path_position_index > 1) {
@@ -2483,7 +2497,7 @@ unsigned short W8PathingService::PlanMovement(W8NavigatorMovementState* movement
     }
     attachment->flags &= ~W8_NAV_ATTACHMENT_RESULT_MASK;
     attachment->flags |= result;
-    g_startup_world->radius = g_startup_world->movement.alternate_radius;
+    g_startup_world->radius = g_startup_world->movement.collision_radius; /* retail +0x170 */
     return result;
 }
 
@@ -3003,14 +3017,16 @@ unsigned int W8PathingService::StepAlongPath(W8NavigatorMovementState* movement,
                         limit = g_float_one_thousand;
                     }
                     in_range = limit <= distance;
-                } else if (attachment->separation + separation <= distance) {
+                } else if (attachment->separation + radius <= distance) {
+                    /* retail 0x00466EC2 adds the 2nd argument (radius) */
                     in_range = static_cast<float>(g_monster_poster_max_distance) <= distance;
                 } else {
                     in_range = false;
                 }
-                if (in_range) {
-                    ActivateMovementTrigger(movement, false);
-                } else {
+                /* Retail jumps from here straight to the single shared
+                   ActivateMovementTrigger below (0x00466F79); the port also
+                   called it inside the in_range branch, firing twice. */
+                if (!in_range) {
                     W8NavigatorAttachment* linked_attachment = m_linked_attachment;
                     if ((linked_attachment == 0) ||
                         (sqrt((attachment->path_destination.x -
@@ -3062,7 +3078,8 @@ unsigned int W8PathingService::StepAlongPath(W8NavigatorMovementState* movement,
         float limit;
         if (attachment->path_cursor == attachment->path_position_index) {
             if (-1 < movement->target_location_id) {
-                if (distance < attachment->separation + separation) {
+                /* retail 0x00466C9E: radius (2nd arg); test ah,1 also takes NaN */
+                if (!(attachment->separation + radius <= distance)) {
                     goto transitioned;
                 }
                 limit = static_cast<float>(g_monster_poster_max_distance);

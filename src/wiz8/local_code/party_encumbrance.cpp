@@ -174,14 +174,19 @@ void RedistributePartyEncumbrance(void)
         return;
     }
 
+    /* Retail 0x004edd77/0x004ede2b compare the condition unsigned (cmp 0x12 / jae), so
+       a condition >= 0x80000000 takes no share; the ratio is fild * 100.0f / fidiv on
+       the x87 stack, stored as float once (found by the w8diff harness). */
     unsigned int slot;
     for (slot = 0; slot < 8; ++slot) {
         W8Character* character = &characters[slot];
         character->party_weight_share = 0;
-        if (active[slot].fOccupied && character->highest_condition < W8_CONDITION_DEAD) {
+        if (active[slot].fOccupied && static_cast<unsigned int>(character->highest_condition) <
+                                          static_cast<unsigned int>(W8_CONDITION_DEAD)) {
             capacity[slot] = character->carrying_capacity;
             unassigned[slot] = capacity[slot] - character->inventory_weight;
-            load_ratio[slot] = unassigned[slot] * 100.0f / capacity[slot];
+            load_ratio[slot] = static_cast<float>(static_cast<double>(unassigned[slot]) * 100.0f /
+                                                  static_cast<double>(capacity[slot]));
         }
     }
 
@@ -195,8 +200,12 @@ void RedistributePartyEncumbrance(void)
         float best_ratio = -999999.0f;
         for (slot = 0; slot < 8; ++slot) {
             W8Character* character = &characters[slot];
-            if (active[slot].fOccupied && character->highest_condition < W8_CONDITION_DEAD &&
-                load_ratio[slot] > best_ratio) {
+            /* Retail 0x004ede31: fcom + test ah,1 also takes the slot when the
+               ratio is NaN (capacity 0). */
+            if (active[slot].fOccupied &&
+                static_cast<unsigned int>(character->highest_condition) <
+                    static_cast<unsigned int>(W8_CONDITION_DEAD) &&
+                !(best_ratio >= load_ratio[slot])) {
                 best_ratio = load_ratio[slot];
                 best_slot = slot;
             }
@@ -207,7 +216,9 @@ void RedistributePartyEncumbrance(void)
         W8Character* character = &characters[best_slot];
         ++character->party_weight_share;
         --unassigned[best_slot];
-        load_ratio[best_slot] = unassigned[best_slot] * 100.0f / capacity[best_slot];
+        load_ratio[best_slot] = static_cast<float>(static_cast<double>(unassigned[best_slot]) *
+                                                   100.0f /
+                                                   static_cast<double>(capacity[best_slot]));
     }
 
     for (slot = 0; slot < 8; ++slot) {

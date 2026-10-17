@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/local_screens/MGSSpellIcons.h"
 #include "wiz8/sr_api.h"
 #include "wiz8/utility.h"
@@ -72,6 +73,11 @@ unsigned char CreateSpellIconHudControls(void)
     }
 
     g_combat_effect_right_count = 0;
+    /* Wide canvas layout A: the party spell icons are the roof's right end;
+       the combat-effect rows hang next to the left / right portrait column. */
+    g_spell_icon_strip->SetLayoutAnchor(W8_ANCHOR_RIGHT);
+    g_combat_effect_left_panel->SetLayoutAnchor(W8_ANCHOR_LEFT);
+    g_combat_effect_right_panel->SetLayoutAnchor(W8_ANCHOR_RIGHT);
     return 1;
 }
 
@@ -272,8 +278,20 @@ void DestroyCombatEffectHudRows(void)
 void InvalidateMainGameEffectHud(void)
 {
     if (g_current_screen_state.id == W8_SCREEN_MAIN_GAME) {
-        ClearSurfaceRect(0x7f, 0x14, 0x201, 0x28);
-        InvalidateRegion(0x7f, 0x14, 0x201, 0x28, 0);
+        if (!CanvasWideLayoutActive()) {
+            ClearSurfaceRect(0x7f, 0x14, 0x201, 0x28);
+            InvalidateRegion(0x7f, 0x14, 0x201, 0x28, 0);
+        } else {
+            /* Layout A: the two effect rows sit at different canvas edges. */
+            {
+                CanvasDrawScope left_scope(W8_ANCHOR_LEFT);
+                ClearSurfaceRect(0x7f, 0x14, 0x140, 0x28);
+                InvalidateRegion(0x7f, 0x14, 0x140, 0x28, 0);
+            }
+            CanvasDrawScope right_scope(W8_ANCHOR_RIGHT);
+            ClearSurfaceRect(0x140, 0x14, 0x201, 0x28);
+            InvalidateRegion(0x140, 0x14, 0x201, 0x28, 0);
+        }
     }
 }
 

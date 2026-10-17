@@ -33,7 +33,7 @@ static_assert(sizeof(W8ConditionNoticeIds) == 8, "W8ConditionNoticeIds_size");
 
 extern W8ConditionNoticeIds g_condition_notices[25];
 extern unsigned short g_enchantment_notices[16];
-extern unsigned short g_condition_interrupt_notices[12];
+extern unsigned short g_condition_interrupt_notices[13];
 
 void RemoveCharacterCondition(int party_slot, W8Condition condition, bool announce);
 void SetMonsterCondition(int location_id, W8Condition condition, int duration, int poison_strength,

@@ -58,4 +58,4 @@ int CharacterPrayAction(int party_slot);
 
 /* GppStringList indices naming each monster special-attack kind,
    indexed by W8MonsterRecord::special_attack_kind; slot zero is unused. */
-extern int g_monster_special_attack_name_ids[12];
+extern int g_monster_special_attack_name_ids[32];

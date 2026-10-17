@@ -9,6 +9,7 @@
 #include "wiz8/dialog_code/DialogInterface.h"
 
 #include "wiz8/utility.h"
+#include "wiz8/canvas.h"
 
 #include "input.h"
 #include "mousesystem_macros.h"
@@ -79,8 +80,19 @@ W8DialogBase::~W8DialogBase()
 }
 
 // FUNCTION: WIZ8 0x005dc890
+void W8DialogBase::ReportZoneOverlay()
+{
+    if (m_initialized && m_error == 0) {
+        CanvasZoneOverlay(m_x, m_y, m_x + m_width, m_y + m_height);
+    }
+}
+
 void W8DialogBase::Draw()
 {
+    /* Mod (window layouter, canvas.h): the open dialog is centered over the
+       laid-out window. Reported every frame while the dialog is drawn
+       (and from DrawDialog - subclasses have their own Draw). */
+    ReportZoneOverlay();
     if ((m_dirty_flags & W8_DIALOG_DIRTY_REDRAW) == 0) {
         return;
     }

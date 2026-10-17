@@ -38,3 +38,7 @@ void HandleExclusiveInput(unsigned short character);
 void AddChar(unsigned short character);
 void SetTextInputCursor(unsigned char cursor);
 void SetInputFieldBlocksMouseCallback(unsigned char field_id, bool blocks);
+/* Wide canvas, layout A (2026-10-12): a text field in a panel anchored to a
+   canvas edge (W8LayoutAnchor). Mouse hit-testing, caret position and drawing
+   of the field use this anchor. Default is centered (as in the original). */
+void SetTextInputFieldLayoutAnchor(unsigned char field_id, int anchor);

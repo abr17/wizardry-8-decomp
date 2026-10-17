@@ -169,6 +169,12 @@ public:
     W8OptionsCheckbox* AddCheckbox(int label, int* value);
     W8TextControl* AddChoiceButton(int label);
     W8OptionsSlider* AddSlider(int label, float* value, bool alternate);
+    W8OptionsSlider* AddSliderText(const wchar_t* label, float* value); /* mod */
+    /* Mod: the same with labels not from StringData.DAT (display settings). */
+    W8TextControl* AddChoiceButtonText(const wchar_t* label);
+    void AddChoicesText(const wchar_t* label, int count, const wchar_t* const* choices,
+                        W8OptionsSelection* selection);
+    void AddDisplaySettings(void);
     void AddChoices(int label, int count, const int* choices, int* value);
 
     int m_current;

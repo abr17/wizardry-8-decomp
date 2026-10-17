@@ -21,6 +21,8 @@
 void W8DialogButton::Draw()
 {
     if (m_dirty && m_button_handle != -1) {
+        /* Wide canvas layout A: draw and invalidate at the anchored edge. */
+        CanvasDrawScope layout_scope(GetButtonLayoutAnchor(m_button_handle));
         int left = GetButtonX(m_button_handle);
         int top = GetButtonY(m_button_handle);
         DrawButton(m_button_handle);

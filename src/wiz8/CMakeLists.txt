@@ -16,6 +16,12 @@ function(wiz8_configure_executable TARGET OUTPUT)
         "${WIZ8_BINKW32_IMPORT_LIBRARY}"
         WIZ8_ZLIB_1_0_4
     )
+    if(WIZ8_MODERN_MSVC)
+        # msvc2022 port: MSVCRT.dll heap and x87 helper imports
+        # (src/msvc2022_compat/msvcrt_heap_bridge.cpp, msvcrt_crt_bridge.c).
+        add_dependencies(${TARGET} ${WIZ8_MSVCRT_IMPORT_TARGET})
+        target_link_libraries(${TARGET} PRIVATE "${WIZ8_MSVCRT_IMPORT_LIBRARY}")
+    endif()
     set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME "${OUTPUT}")
 endfunction()
 
@@ -28,7 +34,14 @@ file(GLOB WIZ8_ZLIB_UNITS CONFIGURE_DEPENDS "${ZLIB_SOURCE}/*.c")
 list(REMOVE_ITEM WIZ8_ZLIB_UNITS
     "${ZLIB_SOURCE}/example.c" "${ZLIB_SOURCE}/minigzip.c")
 add_library(WIZ8_ZLIB_1_0_4 STATIC EXCLUDE_FROM_ALL ${WIZ8_ZLIB_UNITS})
-target_compile_options(WIZ8_ZLIB_1_0_4 PRIVATE /nologo /O2 /MD)
+if(WIZ8_MODERN_MSVC)
+    # msvc2022 port: static CRT like the rest of the image.
+    target_compile_options(WIZ8_ZLIB_1_0_4 PRIVATE /nologo /O2 /MT /GS- /arch:IA32)
+    target_compile_definitions(WIZ8_ZLIB_1_0_4 PRIVATE
+        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
+else()
+    target_compile_options(WIZ8_ZLIB_1_0_4 PRIVATE /nologo /O2 /MD)
+endif()
 target_compile_definitions(WIZ8_ZLIB_1_0_4 PRIVATE NDEBUG WIN32)
 target_include_directories(WIZ8_ZLIB_1_0_4 PRIVATE "${ZLIB_SOURCE}")
 
@@ -76,11 +89,25 @@ target_link_libraries(wiz8_recovered_instrumentable_objects PRIVATE wiz8_compile
 target_compile_options(wiz8_recovered_instrumentable_objects PRIVATE /Ob2)
 wiz8_lint_target(wiz8_recovered_instrumentable_objects)
 
+if(WIZ8_MODERN_MSVC)
+    # msvc2022 port: global operator new/delete routed to MSVCRT.dll (the CRT
+    # retail SR.dll allocates and frees with) and local bodies for the
+    # srClassSupport<> members MSVC 2022 would import (see each file header).
+    set(WIZ8_MODERN_MSVC_EXTRA_SOURCES
+        "${PROJECT_SOURCE_DIR}/src/msvc2022_compat/msvcrt_heap_bridge.cpp"
+        "${PROJECT_SOURCE_DIR}/src/msvc2022_compat/msvcrt_crt_bridge.c"
+        "${PROJECT_SOURCE_DIR}/src/msvc2022_compat/sr_template_base_imports.cpp")
+endif()
+
 if(NOT WIZ8_ANALYSIS_BUILD)
     wiz8_add_import_library(WIZ8_SR imports/sr.def
         IMPORT_OBJECTS "${CMAKE_BINARY_DIR}/sr-assert-import.lib")
     wiz8_add_import_library(WIZ8_MSS32 imports/mss32.def PRESERVE_C_DECORATION)
     wiz8_add_import_library(WIZ8_BINKW32 imports/binkw32.def PRESERVE_C_DECORATION)
+    if(WIZ8_MODERN_MSVC)
+        wiz8_add_import_library(WIZ8_MSVCRT ../msvc2022_compat/msvcrt.def
+            IMPORT_OBJECTS "${WIZ8_MSVCRT_BRIDGE_IMPORT}")
+    endif()
 
     # Every product uses the same SGP archive. Comparison can also inspect
     # individual object contributions when a function is discarded at link.
@@ -89,6 +116,13 @@ if(NOT WIZ8_ANALYSIS_BUILD)
         $<TARGET_OBJECTS:wiz8_recovered_instrumentable_objects>
     )
     wiz8_configure_executable(WIZ8 Wiz8)
+    if(WIZ8_MODERN_MSVC)
+        target_sources(WIZ8 PRIVATE ${WIZ8_MODERN_MSVC_EXTRA_SOURCES})
+        target_link_options(WIZ8 PRIVATE ${WIZ8_MODERN_MSVC_LINK_OPTIONS}
+            /FORCE:UNRESOLVED /FIXED:NO /BASE:0x400000
+            /STACK:0x100000,0x1000 /HEAP:0x100000,0x1000
+            "/MAP:${CMAKE_BINARY_DIR}/Wiz8.map")
+    else()
     target_link_options(WIZ8 PRIVATE
         /DEBUG /DEBUGTYPE:CV /PDBTYPE:SEPT /INCREMENTAL:NO /OPT:NOREF /OPT:NOICF /FIXED:NO
         /FORCE:UNRESOLVED /BASE:0x400000 /FILEALIGN:0x1000
@@ -96,6 +130,7 @@ if(NOT WIZ8_ANALYSIS_BUILD)
         /STACK:0x100000,0x1000 /HEAP:0x100000,0x1000
         "/MAP:${CMAKE_BINARY_DIR}/Wiz8.map" /MAPINFO:LINES
     )
+    endif()
 endif()
 
 # Test products share the same recovered objects but do not belong to the game source model.

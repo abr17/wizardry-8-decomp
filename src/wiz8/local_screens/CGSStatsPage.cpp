@@ -59,7 +59,10 @@ static W8CharacterStatsRecord g_character_profession_records[15] = {
     {0x0000010b, 0x0000001a, 0x0000001b, 0x02b2, 0, 0},
 };
 // GLOBAL: WIZ8 0x0064f118
-static W8CharacterStatsRecord g_character_race_records[W8_RACE_PLAYABLE_COUNT] = {
+// All 16 retail rows: the picker only offers the first 11 (count 0xb passed to
+// Initialize below), but SetValue(character->iRace) indexes with the RPC races
+// too (Trynnie, T'Rang, Umpani, Rapax, Android) on the level-up stats page.
+static W8CharacterStatsRecord g_character_race_records[W8_RACE_COUNT] = {
     {0x0000010c, 0x00000008, 0x00000009, 0x0284, 1, 0},
     {0x0000010c, 0x00000004, 0x00000005, 0x0285, 1, 0},
     {0x0000010c, 0x0000000c, 0x0000000d, 0x0286, 1, 0},
@@ -71,6 +74,11 @@ static W8CharacterStatsRecord g_character_race_records[W8_RACE_PLAYABLE_COUNT] =
     {0x0000010c, 0x00000002, 0x00000003, 0x028c, 1, 0},
     {0x0000010c, 0x00000012, 0x00000013, 0x028d, 1, 0},
     {0x0000010c, 0x00000006, 0x00000007, 0x028e, 1, 0},
+    {0x0000010c, 0x0000001e, 0x0000001f, 0x028f, 0, 0},
+    {0x0000010c, 0x00000018, 0x00000019, 0x0290, 0, 0},
+    {0x0000010c, 0x00000016, 0x00000017, 0x0291, 0, 0},
+    {0x0000010c, 0x0000001a, 0x0000001b, 0x0292, 0, 0},
+    {0x0000010c, 0x0000001c, 0x0000001d, 0x0293, 0, 0},
 };
 // GLOBAL: WIZ8 0x0064f218
 static W8CharacterStatsRecord g_character_gender_records[2] = {
@@ -1006,7 +1014,8 @@ void W8CharacterStatsPage::Redraw()
                 bounds.bottom = bounds.top + 0xe;
                 bounds.right = bounds.left + 0x21;
                 text.SetLayoutBounds(&bounds, true, true);
-                int value = m_character->resistances[realm].total - 0x19;
+                /* Retail 0x005CB424: reads innate resistances[realm].base (+0xedd), not the bonus-inclusive total. */
+                int value = static_cast<int>(m_character->resistances[realm].base) - 0x19;
                 const wchar_t* value_text = value == 0 ? FormatWideString(g_dash)
                                                        : FormatWideString(g_format_plus_d, value);
                 text.RenderString(value_text, g_wiz_text_font_secondary, false, FRAME_BUFFER);
@@ -1056,7 +1065,8 @@ void W8CharacterStatsPage::Redraw()
             bounds.top = top + 0x179;
             bounds.bottom = top + 0x185;
             text.SetLayoutBounds(&bounds, true, true);
-            text.RenderString(FormatWideString(g_format_d, m_creation_state->skill_points_total),
+            /* Retail 0x005CB70E: prints skill_points_remaining (creation state +0x64), not the total pool. */
+            text.RenderString(FormatWideString(g_format_d, m_creation_state->skill_points_remaining),
                               g_wiz_text_font_secondary, false, FRAME_BUFFER);
         }
         text.SetLayoutMode(g_W8TextBufferAlignLeft | g_W8TextBufferAlignMiddle);

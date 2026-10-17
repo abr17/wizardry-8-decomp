@@ -610,6 +610,14 @@ void W8GrCycle::TickAnimation(float scale)
 
             rate = GetCurrentAnimationScale() * scale;
             progress = elapsed * rate * g_float_one_thousandth;
+            /* Mod (robustness): a non-numeric or huge animation speed
+               (NaN/infinity from the navigator) gave up to 2^31 frame steps and
+               hung the game. A second (elapsed <= 1000 ms) of normal animation is
+               tens of frames; more than 4096 only comes from garbage. */
+            if (!(progress >= 0.0f && progress < 4096.0f)) {
+                progress = 0.0f;
+                representation->timer = now;
+            }
             frames = static_cast<int>(progress);
             frame_fraction = progress - frames;
 

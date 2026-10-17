@@ -380,7 +380,8 @@ bool ResolvePickedProp(W8World* world)
                 distance = ((minimum + maximum) * 0.5 - camera_position).Length();
                 if (trigger->range_minimum <= distance) {
                     g_selected_prop_index = prop_index;
-                    if (distance <= trigger->range_maximum) {
+                    /* Retail 0x0044D9C0: test ah,0x41; jne select -- less, equal or unordered (NaN) accepts. */
+                    if (!(distance > trigger->range_maximum)) {
                         continue;
                     }
                 }
@@ -1216,13 +1217,14 @@ void W8Prop::GetBounds(srVector3T<float>* minimum, srVector3T<float>* maximum)
     for (frame = 1; frame < total; ++frame) {
         Rep()->subcycle = static_cast<unsigned char>(frame);
         AnimObjGetBounds(Rep()->animation, 2, Rep()->subcycle, &local_minimum, &local_maximum);
-        if (local_minimum.x < minimum->x) {
+        /* Retail 0x0044DDF3: fcomp; test ah,1 -- copies on less OR unordered (NaN), i.e. !(local >= cur). */
+        if (!(local_minimum.x >= minimum->x)) {
             minimum->x = local_minimum.x;
         }
-        if (local_minimum.y < minimum->y) {
+        if (!(local_minimum.y >= minimum->y)) {
             minimum->y = local_minimum.y;
         }
-        if (local_minimum.z < minimum->z) {
+        if (!(local_minimum.z >= minimum->z)) {
             minimum->z = local_minimum.z;
         }
         if (local_maximum.x > maximum->x) {

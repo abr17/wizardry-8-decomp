@@ -32,6 +32,7 @@
 #include "wiz8/engine_code/OctPath.h"
 #include "wiz8/fonts.h"
 #include "wiz8/utility.h"
+#include "wiz8/canvas.h"
 #include "vobject_blitters.h"
 #include "Font.h"
 #include "line.h"
@@ -436,6 +437,348 @@ void ReleaseMessageStorage(void)
             memset(record, 0, sizeof(*record));
         }
     }
+}
+
+/* ---- Mod: re-wrapping log lines to the current width (see MGSTextBox.h) ----
+
+   How the log is stored: ShowNotice cuts a message into lines by the width of the text
+   window and stores each line as a separate record; the first has link = 0,
+   continuations 1, 2, ... A word wrap leaves the separator (space) at the
+   start of the next line, so concatenating consecutive records gives the original
+   text. A wrap on '\n' consumes the newline character - such a record does not start
+   with a space, and at it the message is split into chunks that are cut
+   separately (link still runs consecutively through the whole message, as in the original). */
+
+/* Where a line is cut - exactly as in the ShowNotice loop: a "word" is one
+   separator and the characters after it up to a space, tab, '\n' or
+   the end; the word goes to the next line if the line with it is not entirely
+   narrower than wrap_width and the line already has at least one word. The line width
+   grows with every character (glyph widths are non-negative), so
+   checking the whole word at once equals the original's per-character check.
+   Returns the number of lines (at most max_lines); line k is [starts[k],
+   ends[k]) in text. */
+static int ReflowWrapLines(const wchar_t* text, unsigned int wrap_width, int font, int* starts,
+                           int* ends, int max_lines)
+{
+    int length = static_cast<int>(wcslen(text));
+    if (static_cast<unsigned int>(StringPixLength(const_cast<wchar_t*>(text), font)) < wrap_width) {
+        starts[0] = 0;
+        ends[0] = length;
+        return 1;
+    }
+    wchar_t line[4096];
+    int count = 0;
+    int pos = 0;
+    bool more = true;
+    while (more && count < max_lines) {
+        int line_start = pos;
+        int line_length = 0;
+        int words = 0;
+        int line_end;
+        int next;
+        line[0] = 0;
+        for (;;) {
+            if (text[pos] == 0) {
+                line_end = pos;
+                next = pos;
+                more = false;
+                break;
+            }
+            if (text[pos] == L'\n') {
+                line_end = pos;
+                next = pos + 1;
+                break;
+            }
+            int word_end = pos + 1;
+            while (text[word_end] != L' ' && text[word_end] != L'\t' && text[word_end] != 0 &&
+                   text[word_end] != L'\n') {
+                ++word_end;
+            }
+            if (line_length + (word_end - pos) >= 4095) {
+                line_end = pos; /* buffer guard: the original never builds a longer line */
+                next = pos;
+                break;
+            }
+            wcsncpy(line + line_length, text + pos, word_end - pos);
+            line[line_length + (word_end - pos)] = 0;
+            if (words != 0 &&
+                static_cast<unsigned int>(StringPixLength(line, font)) >= wrap_width) {
+                line[line_length] = 0;
+                line_end = pos;
+                next = pos;
+                break;
+            }
+            line_length += word_end - pos;
+            pos = word_end;
+            ++words;
+        }
+        starts[count] = line_start;
+        ends[count] = line_end;
+        ++count;
+        pos = next;
+    }
+    return count;
+}
+
+/* Growing array of records for the new layout of one window. */
+struct W8ReflowRecords {
+    W8MessageStorageRecord* items;
+    int count;
+    int capacity;
+};
+
+static W8MessageStorageRecord* ReflowAppend(W8ReflowRecords* out)
+{
+    if (out->count == out->capacity) {
+        int capacity = out->capacity == 0 ? 0x200 : out->capacity * 2;
+        W8MessageStorageRecord* items = static_cast<W8MessageStorageRecord*>(
+            realloc(out->items, capacity * sizeof(W8MessageStorageRecord)));
+        if (items == 0) {
+            return 0;
+        }
+        out->items = items;
+        out->capacity = capacity;
+    }
+    W8MessageStorageRecord* record = &out->items[out->count++];
+    memset(record, 0, sizeof(*record));
+    return record;
+}
+
+/* A continuation of a word wrap (not a message start, not a line break, not
+   a line with a tail appended by AppendTextBoxLine). */
+static bool ReflowIsWordContinuation(const W8MessageStorageRecord* record)
+{
+    return record->link > 0 && record->wString != 0 &&
+           (record->wString[0] == L' ' || record->wString[0] == L'\t');
+}
+
+/* Re-cut the message chunk [first, last) of window box. */
+static bool ReflowSegment(int box, int first, int last, int* link, unsigned int wrap_width,
+                          int font, W8ReflowRecords* out)
+{
+    W8MessageStorageRecord* records = g_message_storage[box];
+    size_t total = 0;
+    for (int part = first; part < last; ++part) {
+        total += wcslen(records[part].wString);
+    }
+    wchar_t* text = static_cast<wchar_t*>(malloc((total + 1) * sizeof(wchar_t)));
+    if (text == 0) {
+        return false;
+    }
+    text[0] = 0;
+    for (int piece = first; piece < last; ++piece) {
+        wcscat(text, records[piece].wString);
+    }
+
+    enum { W8_REFLOW_MAX_LINES = 512 };
+    int starts[W8_REFLOW_MAX_LINES];
+    int ends[W8_REFLOW_MAX_LINES];
+    int lines = ReflowWrapLines(text, wrap_width, font, starts, ends, W8_REFLOW_MAX_LINES);
+    if (lines == W8_REFLOW_MAX_LINES && ends[lines - 1] < static_cast<int>(total)) {
+        free(text);
+        return false; /* did not fit - better leave the log as is */
+    }
+    for (int line = 0; line < lines; ++line) {
+        W8MessageStorageRecord* record = ReflowAppend(out);
+        if (record == 0) {
+            free(text);
+            return false;
+        }
+        /* Line properties come from the old record with the same number (the last one -
+           from the last): color, display hours, saved remaining hours. */
+        int source_index = first + line;
+        if (source_index >= last) {
+            source_index = last - 1;
+        }
+        const W8MessageStorageRecord* source = &records[source_index];
+        int line_length = ends[line] - starts[line];
+        record->wString = static_cast<wchar_t*>(malloc((line_length + 1) * sizeof(wchar_t)));
+        if (record->wString == 0) {
+            --out->count;
+            free(text);
+            return false;
+        }
+        wcsncpy(record->wString, text + starts[line], line_length);
+        record->wString[line_length] = 0;
+        record->font_palette = records[first].font_palette;
+        record->highlight_color = 0xff;
+        record->clock = source->clock;
+        record->saved_remaining_ms = source->saved_remaining_ms;
+        record->link = (*link)++;
+        record->length = -1;
+        record->entries = 0;
+        memcpy(record->unknown_1c, records[first].unknown_1c, sizeof(record->unknown_1c));
+
+        /* Highlighting (character name etc.): ranges of the old lines in
+           coordinates of the concatenated text, intersected with the new line. */
+        int offset = 0;
+        for (int span = first; span < last; ++span) {
+            const W8MessageStorageRecord* old = &records[span];
+            if (old->highlight_color != 0xff && old->highlight_stop > old->highlight_start) {
+                int span_start = offset + old->highlight_start;
+                int span_stop = offset + old->highlight_stop;
+                if (span_start < starts[line]) {
+                    span_start = starts[line];
+                }
+                if (span_stop > ends[line]) {
+                    span_stop = ends[line];
+                }
+                if (span_start < span_stop && record->highlight_color == 0xff) {
+                    int local_start = span_start - starts[line];
+                    int local_stop = span_stop - starts[line];
+                    record->highlight_color = old->highlight_color;
+                    record->highlight_start =
+                        static_cast<unsigned char>(local_start > 0xff ? 0xff : local_start);
+                    record->highlight_stop =
+                        static_cast<unsigned char>(local_stop > 0xff ? 0xff : local_stop);
+                }
+            }
+            offset += static_cast<int>(wcslen(old->wString));
+        }
+    }
+    free(text);
+    return true;
+}
+
+static void FreeReflowRecord(W8MessageStorageRecord* record)
+{
+    if (record->wString) {
+        free(record->wString);
+        record->wString = 0;
+    }
+    record->ClearEntries();
+}
+
+static void ReflowMessageBox(int box, unsigned int wrap_width, unsigned int visible_width)
+{
+    W8MessageStorageRecord* records = g_message_storage[box];
+    int used = static_cast<int>(g_status.text_box_lines_used[box]);
+    int shown = static_cast<int>(g_status.text_box_lines_shown[box]);
+    if (shown > used) {
+        shown = used;
+    }
+    /* Lines not shown yet (they appear one by one) are not touched, nor is
+       the message on the boundary of what has been shown. */
+    int prefix = shown;
+    while (prefix > 0 && prefix < used && records[prefix].link > 0) {
+        --prefix;
+    }
+    if (prefix == 0) {
+        return;
+    }
+    for (int check = 0; check < prefix; ++check) {
+        if (records[check].wString == 0) {
+            return; /* corrupted log - leave as is */
+        }
+    }
+    const int font = g_level_block->text_box_font;
+    /* With W = 640 the original log is not touched: only if it has lines
+       wider than the window (a save from a wide game, lines without width at load). */
+    if (g_canvas_ox <= 0) {
+        bool overflow = false;
+        for (int check = 0; check < prefix && !overflow; ++check) {
+            overflow = static_cast<unsigned int>(StringPixLength(records[check].wString, font)) >
+                       visible_width;
+        }
+        if (!overflow) {
+            return;
+        }
+    }
+
+    W8ReflowRecords out = {0, 0, 0};
+    bool ok = true;
+    int message = 0;
+    while (message < prefix && ok) {
+        int message_end = message + 1;
+        while (message_end < prefix && records[message_end].link > 0) {
+            ++message_end;
+        }
+        bool tail = false; /* a line with a right-aligned tail */
+        for (int probe = message; probe < message_end; ++probe) {
+            tail = tail || records[probe].length != -1;
+        }
+        int link = 0;
+        if (tail) {
+            for (int line = message; line < message_end && ok; ++line) {
+                W8MessageStorageRecord* copy = ReflowAppend(&out);
+                if (copy == 0) {
+                    ok = false;
+                    break;
+                }
+                *copy = records[line];
+                copy->wString = static_cast<wchar_t*>(
+                    malloc((wcslen(records[line].wString) + 1) * sizeof(wchar_t)));
+                if (copy->wString == 0) {
+                    --out.count;
+                    ok = false;
+                    break;
+                }
+                wcscpy(copy->wString, records[line].wString);
+                copy->entries = 0;
+            }
+        } else {
+            int segment = message;
+            while (segment < message_end && ok) {
+                int segment_end = segment + 1;
+                while (segment_end < message_end &&
+                       ReflowIsWordContinuation(&records[segment_end])) {
+                    ++segment_end;
+                }
+                ok = ReflowSegment(box, segment, segment_end, &link, wrap_width, font, &out);
+                segment = segment_end;
+            }
+        }
+        message = message_end;
+    }
+    if (!ok) {
+        for (int failed = 0; failed < out.count; ++failed) {
+            FreeReflowRecord(&out.items[failed]);
+        }
+        free(out.items);
+        return;
+    }
+
+    /* More than 350 lines (the window became narrower) - the oldest drop off, as in
+       AppendNoticeLine. */
+    const int limit = 0x15e;
+    const int unshown = used - prefix;
+    int drop = out.count + unshown - limit;
+    if (drop < 0) {
+        drop = 0;
+    }
+    for (int dropped = 0; dropped < drop && dropped < out.count; ++dropped) {
+        FreeReflowRecord(&out.items[dropped]);
+    }
+    for (int old = 0; old < prefix; ++old) {
+        FreeReflowRecord(&records[old]);
+    }
+    W8MessageStorageRecord tail_records[0x15e];
+    memcpy(tail_records, records + prefix, unshown * sizeof(W8MessageStorageRecord));
+    memset(records, 0, limit * sizeof(W8MessageStorageRecord));
+    int kept = out.count - drop;
+    if (kept > 0) {
+        memcpy(records, out.items + drop, kept * sizeof(W8MessageStorageRecord));
+    }
+    memcpy(records + kept, tail_records, unshown * sizeof(W8MessageStorageRecord));
+    free(out.items);
+
+    g_status.text_box_lines_used[box] = kept + unshown;
+    g_status.text_box_lines_shown[box] = kept + (shown - prefix);
+}
+
+void ReflowMessageStorage(void)
+{
+    if (g_level_block == 0 || g_level_block->text_box_right <= g_level_block->text_box_left) {
+        return;
+    }
+    unsigned int width =
+        static_cast<unsigned int>(g_level_block->text_box_right - g_level_block->text_box_left);
+    /* Windows 0 and 1 (log and combat) are cut with ShowNotice's automatic width,
+       window 3 (conversation) - with GetTextBoxScrollRange's width. Window 2 (item
+       and spell selection) lives in its own widths and is not touched. */
+    ReflowMessageBox(0, width - 10, width);
+    ReflowMessageBox(1, width - 10, width);
+    ReflowMessageBox(3, width, width);
 }
 
 /* How many lines the text box can still be scrolled through. */

@@ -1,3 +1,6 @@
+#include "wiz8/canvas.h"
+#include "wiz8/local_screens/MainGameLayout.h"
+#include "wiz8/russian_text.h"
 #include <windows.h>
 #include "wiz8/wiz8_windows.h"
 #include "wiz8/spell_ids.h"
@@ -201,7 +204,11 @@ void W8NpcTypedDialoguePanel::SetEnabled(bool enable)
         Controls::SetEnabled(enable);
         if (enable) {
             InitTextInputModeWithScheme(1);
-            AddTextInputField(0x1e5, 0x170, 0x7a, 0x12, 0x7f, &g_empty_wide_string, 0xbe, 0xf, 1);
+            char field =
+                AddTextInputField(0x1e5, 0x170, 0x7a, 0x12, 0x7f, &g_empty_wide_string, 0xbe, 0xf, 1);
+            /* Layout A: the keyword input field - at the canvas edge together
+               with the panel (mouse, caret, drawing). Outside the layout - nothing. */
+            SetTextInputFieldLayoutAnchor(static_cast<unsigned char>(field), m_layoutAnchor);
         } else {
             RemoveTextInputField(0);
         }
@@ -218,6 +225,8 @@ void W8NpcTypedDialoguePanel::Redraw()
     if (!m_fEnabled) {
         return;
     }
+    /* Layout A: the panel (and the input field frame) at its canvas edge. */
+    CanvasDrawScope layout_scope(m_layoutAnchor);
     if (m_fDirty) {
         if (m_catalogObject != -1) {
             DrawCatalogImage(FRAME_BUFFER, m_catalogObject, m_catalogFrame, m_catalogImage,
@@ -271,6 +280,8 @@ void W8NpcDialogueOptionsPanel::Redraw()
     if (!m_fEnabled) {
         return;
     }
+    /* Layout A: the left column of the subscreen at the left canvas edge. */
+    CanvasDrawScope layout_scope(m_layoutAnchor);
     if (m_fDirty) {
         if (m_catalogObject != -1) {
             DrawCatalogImage(FRAME_BUFFER, m_catalogObject, m_catalogFrame,
@@ -670,6 +681,7 @@ unsigned char OpenNpcDialoguePanel(W8NpcState* npc, W8ItemInstance* item, bool f
     bool greet;
     wchar_t space[2];
     srVector3T<float> position;
+    W8MainUiMode previous_main_ui_mode;
 
     UpdateScreenOverlays(0);
     gXStatus.fNpcDialogueMode = true;
@@ -677,6 +689,9 @@ unsigned char OpenNpcDialoguePanel(W8NpcState* npc, W8ItemInstance* item, bool f
     if (npc->record->owns_stock != 0) {
         RestockNpcInventory(npc);
     }
+    /* Retail 0x0056CB0F: the pre-dialogue mode is read (into esi) before
+       ApplyMainGameModeFlag below overwrites g_settings.main_ui_mode. */
+    previous_main_ui_mode = g_settings.main_ui_mode;
     state = g_npc_interaction_state;
     state->dialogue_layout = W8_DIALOGUE_LAYOUT_NONE;
     if (!gXStatus.fCampMode) {
@@ -711,10 +726,14 @@ unsigned char OpenNpcDialoguePanel(W8NpcState* npc, W8ItemInstance* item, bool f
         SetViewportMode(GetMainGameViewportMode());
     }
     if (!gXStatus.fCampMode) {
-        g_npc_interaction_state->saved_main_ui_mode = g_settings.main_ui_mode;
+        /* Retail 0x0056CC6E: saves the original mode, not the PORTRAITS
+           value ApplyMainGameModeFlag just stored. */
+        g_npc_interaction_state->saved_main_ui_mode = previous_main_ui_mode;
     }
     CreateNpcDialogueControls();
-    SetRegionBounds(0x8a, 0x17, 0x166, 0x269, 0x1c2);
+    /* Region 0x8a - the whole bottom panel (0x17, 0x166 .. 0x269, 0x1c2); in
+       layout A it is stretched across the whole wide panel. */
+    SetBottomPanelRegionBounds(0x8a);
     g_level_block->text_box_visible = false;
     RegionSetEnable(0x15);
     EnableRegionInput(0x52);
@@ -1047,6 +1066,26 @@ void CreateNpcDialogueControls(void)
     state->dialogue_controls[W8_NPC_CONTROL_TEXT_7]->m_primaryActivationCallback =
         BackOutNpcDialogue;
     state->dialogue_controls[W8_NPC_CONTROL_TEXT_7]->EnableRegionHelp(0x7c8);
+
+    /* Wide canvas, layout A (2026-10-12): the subscreen occupies the whole wide
+       bottom panel the same way as the HUD. The left column (NPC name, action
+       and filter buttons) - at the left canvas edge, in place of the radar; the middle (conversation
+       text, list of goods and services) is stretched by 2*ox, like the log;
+       the right column (keyword transcript, categories, word input,
+       item and price in trading) - at the right edge, in place of the formation board.
+       The text window in conversation is the main log window, it is already stretched
+       (SetMainTextBoxRegionBounds) and fits exactly into the stretched middle.
+       Outside the layout (W = 640, camp) all shifts are zero. */
+    PlaceSubscreenPanel(state->dialogue_panels[0], W8_SUBSCREEN_LEFT);
+    PlaceSubscreenPanel(state->dialogue_panels[1], W8_SUBSCREEN_STRETCH);
+    for (int index = 2; index < 7; ++index) {
+        PlaceSubscreenPanel(state->dialogue_panels[index], W8_SUBSCREEN_RIGHT);
+    }
+    /* The region over the text area stretches together with the middle. */
+    StretchWidgetRegion(state->dialogue_controls[W8_NPC_CONTROL_WIDGET]);
+    /* Region 9 - the transcript keyword list (its bounds are set by
+       W8NpcDialogueTextController::Expand in panel coordinates). */
+    SetRegionLayoutAnchor(9, state->dialogue_panels[2]->m_layoutAnchor);
 }
 
 static void OpenNpcDialogueLayout(W8NpcDialogueLayout layout)
@@ -1300,6 +1339,16 @@ bool IsPortraitObscuredByNpcDialogue(unsigned int party_slot)
 {
     if (gXStatus.fNpcDialogueMode && !g_npc_interaction_state->scripted_dialogue &&
         g_npc_interaction_state->dialogue_panels[2]->m_fEnabled) {
+        /* Layout A: the transcript is pinned to the right canvas edge together with
+           the right portrait column, so it overlaps them exactly as in the
+           original - the original's check. If the panel is still centered
+           (anchor not set), the old rule applies: overlap
+           only while the middle has not separated from the column. */
+        if (CanvasWideLayoutActive() &&
+            g_npc_interaction_state->dialogue_panels[2]->m_layoutAnchor == W8_ANCHOR_CENTER &&
+            g_npc_interaction_state->dialogue_panels[2]->m_bounds.right <= 0x200 + g_canvas_ox) {
+            return false;
+        }
         return static_cast<W8NpcDialogueTextController*>(
                    g_npc_interaction_state->dialogue_panels[2])
             ->IsSlotPortraitTranscriptCovered(party_slot);
@@ -1325,6 +1374,13 @@ void ActivateNpcDialoguePanels(bool active)
 {
     bool redraw_scroll = false;
     if (!g_npc_interaction_state->scripted_dialogue) {
+        if (active) {
+            /* Layout A: stretched regions for the current canvas state
+               (if the conversation survived leaving the main screen and coming back). Outside
+               the layout these are the original bounds. */
+            StretchWidgetRegion(g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_WIDGET]);
+            SetBottomPanelRegionBounds(0x8a);
+        }
         Controls** panel = g_npc_interaction_state->dialogue_panels;
         for (int i = 0; i < 7; i++) {
             if (panel[i]->m_fEnabled) {
@@ -1765,7 +1821,7 @@ static void ShowNpcTradeGold()
     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_31]->SetEnabled(true);
     static_cast<W8TextControl*>(g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_36])
         ->m_textBuffer.SetText(gppStringList[0x72d], g_wiz_text_font_secondary);
-    swprintf(text, L"%dg", g_npc_interaction_state->trade_gold);
+    swprintf(text, RussianOr(L"%dg", L"%dз"), g_npc_interaction_state->trade_gold);
     static_cast<W8TextControl*>(g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_35])
         ->m_textBuffer.SetText(text, g_wiz_text_font_secondary);
     g_npc_interaction_state->dialogue_panels[5]->Invalidate(0);
@@ -1832,7 +1888,7 @@ void UpdateNpcTradeSelection(int index, int increment, int commit)
                     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_37])
                     ->m_textBuffer.SetGeometryDirty();
             }
-            swprintf(price_text, L"%dg",
+            swprintf(price_text, RussianOr(L"%dg", L"%dз"),
                      CalculateNpcTradeStackPrice(g_npc_interaction_state->dialogue_npc,
                                                  g_npc_interaction_state->trade_item->iItemNo,
                                                  W8_TRADE_PRICE_PARTY_BUYS,
@@ -1855,7 +1911,7 @@ void UpdateNpcTradeSelection(int index, int increment, int commit)
                 W8_TRADE_PRICE_PARTY_SELLS, g_npc_interaction_state->trade_quantity,
                 g_npc_interaction_state->trade_item->identified);
             if (wants_item) {
-                swprintf(price_text, L"%dg", price);
+                swprintf(price_text, RussianOr(L"%dg", L"%dз"), price);
             } else {
                 swprintf(price_text, L"---");
             }
@@ -1914,9 +1970,12 @@ void ResetNpcDialogueItemEditor(void)
 void BackOutNpcDialogue(void)
 {
     switch (g_npc_interaction_state->dialogue_layout) {
-    case W8_DIALOGUE_LAYOUT_SERVICES:
+    case W8_DIALOGUE_LAYOUT_SERVICES: {
+        /* Retail 0x005700F8 reads previous_dialogue_layout before the close:
+           outside camp CloseNpcDialogueMode1Layout overwrites it with SERVICES. */
+        W8NpcDialogueLayout previous = g_npc_interaction_state->previous_dialogue_layout;
         CloseNpcDialogueMode1Layout();
-        switch (g_npc_interaction_state->previous_dialogue_layout) {
+        switch (previous) {
         case W8_DIALOGUE_LAYOUT_TOPIC_MENU:
             ShowNpcDialogueTopicMenu();
             break;
@@ -1927,6 +1986,7 @@ void BackOutNpcDialogue(void)
             break;
         }
         break;
+    }
     case W8_DIALOGUE_LAYOUT_MAIN_TEXT_BOX: {
         bool flag = g_npc_interaction_state->reopen_topics;
         CloseNpcDialogueOptionLayout();
@@ -2261,8 +2321,12 @@ void CloseNpcDialogueTranscriptLayout(void)
     SetNpcDialogueLayoutMode(W8_DIALOGUE_LAYOUT_NONE);
     static_cast<W8NpcDialogueTextController*>(g_npc_interaction_state->dialogue_panels[2])
         ->ClearBackground();
-    ClearSurfaceRect(0x1dc, 0x11b, 0x269, 0x1c2);
-    InvalidateRegion(0x1dc, 0x11b, 0x269, 0x1c2, 0);
+    {
+        /* Layout A: the transcript - at the right canvas edge. */
+        CanvasDrawScope layout_scope(g_npc_interaction_state->dialogue_panels[2]->m_layoutAnchor);
+        ClearSurfaceRect(0x1dc, 0x11b, 0x269, 0x1c2);
+        InvalidateRegion(0x1dc, 0x11b, 0x269, 0x1c2, 0);
+    }
     for (index = 0; index < 8; ++index) {
         if (g_status.buffers.XChar[index].fOccupied) {
             RegionSetEnable(7 + index);
@@ -2523,7 +2587,7 @@ void OpenNpcDialogueOptionLayout(void)
     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_31]->SetEnabled(false);
     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_31]
         ->m_primaryActivationCallback = ConfirmNpcTradeSlot;
-    swprintf(buffer, L"%dg", g_status.party_gold);
+    swprintf(buffer, RussianOr(L"%dg", L"%dз"), g_status.party_gold);
     static_cast<W8TextControl*>(g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_33])
         ->m_textBuffer.SetText(buffer, g_wiz_text_font_secondary);
     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_37]->SetEnabled(false);
@@ -3095,7 +3159,7 @@ void OpenNpcDialogueMode5Layout(void)
     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_31]->SetEnabled(false);
     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_31]
         ->m_primaryActivationCallback = ConfirmNpcTradeSlot;
-    swprintf(buffer, L"%dg", g_status.party_gold);
+    swprintf(buffer, RussianOr(L"%dg", L"%dз"), g_status.party_gold);
     static_cast<W8TextControl*>(g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_33])
         ->m_textBuffer.SetText(buffer, g_wiz_text_font_secondary);
     g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_37]->SetEnabled(false);
@@ -3568,16 +3632,19 @@ void HandleNpcDialogueInput(void)
     if (word_count > 2) {
         show_fallback = false;
     }
-    if (_wcsnicmp(field_text, gppStringList[0x76b], 4) == 0 ||
-        _wcsnicmp(field_text, gppStringList[0x76c], 7) == 0) {
+    /* Prefix tests: retail's bounded compare (0x4028c0, Cyrillic-aware with
+       the Russian text on). The lengths are retail's (English) constants; the
+       translators' exe keeps them too. */
+    if (CompareWideTextNIgnoreCase(field_text, gppStringList[0x76b], 4) == 0 ||
+        CompareWideTextNIgnoreCase(field_text, gppStringList[0x76c], 7) == 0) {
         RequestNpcJoinParty();
         return;
     }
     if (g_npc_interaction_state->where_is_query) {
         const wchar_t* fmt;
-        if (_wcsnicmp(field_text, gppStringList[0x76d], 9) == 0 ||
-            _wcsnicmp(field_text, gppStringList[0x76e], 0xa) == 0 ||
-            _wcsnicmp(field_text, gppStringList[0x76f], 8) == 0) {
+        if (CompareWideTextNIgnoreCase(field_text, gppStringList[0x76d], 9) == 0 ||
+            CompareWideTextNIgnoreCase(field_text, gppStringList[0x76e], 0xa) == 0 ||
+            CompareWideTextNIgnoreCase(field_text, gppStringList[0x76f], 8) == 0) {
             fmt = g_format_s;
         } else {
             fmt = gppStringList[0x76a];
@@ -3598,12 +3665,12 @@ void HandleNpcDialogueInput(void)
 
     if (quote_id == -1) {
         wcscpy(buf, field_text);
-        if (_wcsnicmp(buf, gppStringList[0x770], 0xb) == 0) {
+        if (CompareWideTextNIgnoreCase(buf, gppStringList[0x770], 0xb) == 0) {
             wcscpy(field_text, buf + 0xb);
             show_fallback = false;
-        } else if (_wcsnicmp(buf, gppStringList[0x76d], 9) == 0 ||
-                   _wcsnicmp(buf, gppStringList[0x76e], 0xa) == 0 ||
-                   _wcsnicmp(buf, gppStringList[0x76f], 8) == 0) {
+        } else if (CompareWideTextNIgnoreCase(buf, gppStringList[0x76d], 9) == 0 ||
+                   CompareWideTextNIgnoreCase(buf, gppStringList[0x76e], 0xa) == 0 ||
+                   CompareWideTextNIgnoreCase(buf, gppStringList[0x76f], 8) == 0) {
             wcscpy(field_text, buf + 9);
             plain_text = false;
             show_fallback = false;
@@ -4172,7 +4239,7 @@ void RefreshNpcTradePartyGold(void)
 {
     wchar_t text[32];
 
-    swprintf(text, L"%dg", g_status.party_gold);
+    swprintf(text, RussianOr(L"%dg", L"%dз"), g_status.party_gold);
     static_cast<W8TextControl*>(g_npc_interaction_state->dialogue_controls[W8_NPC_CONTROL_TEXT_33])
         ->m_textBuffer.SetText(text, g_wiz_text_font_secondary);
 }
@@ -4527,8 +4594,13 @@ void SetNpcDialogueHidden(char value)
         RegionSetDisable(0x16);
         static_cast<W8NpcDialogueTextController*>(g_npc_interaction_state->dialogue_panels[2])
             ->ClearBackground();
-        ClearSurfaceRect(0x1dc, 0x11b, 0x269, 0x1c2);
-        InvalidateRegion(0x1dc, 0x11b, 0x269, 0x1c2, 0);
+        {
+            /* Layout A: the transcript - at the right canvas edge. */
+            CanvasDrawScope layout_scope(
+                g_npc_interaction_state->dialogue_panels[2]->m_layoutAnchor);
+            ClearSurfaceRect(0x1dc, 0x11b, 0x269, 0x1c2);
+            InvalidateRegion(0x1dc, 0x11b, 0x269, 0x1c2, 0);
+        }
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_1);
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_3);
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_5);
@@ -4948,8 +5020,12 @@ unsigned char SetNpcDialoguePanelVisible(unsigned char value)
             controller = static_cast<W8NpcDialogueTextController*>(
                 g_npc_interaction_state->dialogue_panels[2]);
             controller->ClearBackground();
-            ClearSurfaceRect(0x1dc, 0x11b, 0x269, 0x1c2);
-            InvalidateRegion(0x1dc, 0x11b, 0x269, 0x1c2, 0);
+            {
+                /* Layout A: the transcript - at the right canvas edge. */
+                CanvasDrawScope layout_scope(controller->m_layoutAnchor);
+                ClearSurfaceRect(0x1dc, 0x11b, 0x269, 0x1c2);
+                InvalidateRegion(0x1dc, 0x11b, 0x269, 0x1c2, 0);
+            }
             RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_1);
             RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_3);
             RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_5);

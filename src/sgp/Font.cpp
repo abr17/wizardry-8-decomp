@@ -228,6 +228,59 @@ INT32 FindFreeFont(void)
     return (-1);
 }
 
+/* Mod (Russian translation): the space cell must be empty. In the Russian
+   FONT12POINT1.sti (used for NPC and character speech bubbles and text input
+   fields) cell 92 (space) has a line drawn in it: 5 pixels of index 1 in
+   row 8 (ETRLE "81 05 01 01 01 01 01 81 00"). Index 1 in fonts is the shadow;
+   the bubble is drawn via gprintfDirty (palette color 0,54,0, dark green),
+   then mprintf (shadow off). Hence a green dash on every space.
+   The bubble code in the translation's exe is the same as GOG's, so it has the dash too.
+   Here the cell is re-encoded as fully transparent: same width, the background
+   (if set) still fills it, as with the English font. The new data
+   (2 bytes per row) is no longer than the old, so it is written in place. */
+static void BlankSpaceGlyph(HVOBJECT font)
+{
+    INT16 index;
+    ETRLEObject* cell;
+    UINT8* data;
+    UINT32 pos = 0;
+    UINT16 row = 0;
+    BOOLEAN opaque = FALSE;
+
+    if (font == NULL || font->ubBitDepth != 8 || font->pETRLEObject == NULL) {
+        return;
+    }
+    index = GetIndex(L' ');
+    if (index < 0 || (UINT16)index >= font->usNumberOfObjects) {
+        return;
+    }
+    cell = &font->pETRLEObject[index];
+    if (cell->uiDataOffset > font->uiSizePixData ||
+        cell->uiDataLength > font->uiSizePixData - cell->uiDataOffset) {
+        return;
+    }
+    data = (UINT8*)font->pPixData + cell->uiDataOffset;
+    /* ETRLE: 0 - end of row; 0x80|n - n transparent; n - n pixels follow. */
+    while (pos < cell->uiDataLength && row < cell->usHeight) {
+        UINT8 code = data[pos++];
+        if (code == 0) {
+            row++;
+        } else if ((code & 0x80) == 0) {
+            opaque = TRUE;
+            break;
+        }
+    }
+    if (!opaque || cell->usWidth == 0 || cell->usWidth > 0x7f ||
+        cell->uiDataLength < 2u * cell->usHeight) {
+        return;
+    }
+    for (row = 0; row < cell->usHeight; row++) {
+        data[row * 2] = (UINT8)(0x80 | cell->usWidth);
+        data[row * 2 + 1] = 0;
+    }
+    cell->uiDataLength = 2u * cell->usHeight;
+}
+
 // LoadFontFile
 //	Loads a font from an ETRLE file, and inserts it into one of the font slots.
 //  This function returns (-1) if it fails, and debug msgs for a reason.
@@ -256,6 +309,12 @@ INT32 LoadFontFile(UINT8* filename)
         return (-1);
     }
 
+    /* Mod (Russian translation): blank space, see BlankSpaceGlyph. Only in Russian
+       mode; in English fonts the space cell is already empty. */
+    if (gfCyrillicText) {
+        BlankSpaceGlyph(FontObjs[LoadIndex]);
+    }
+
     if (FontDefault == (-1))
         FontDefault = LoadIndex;
 
@@ -275,6 +334,9 @@ void UnloadFont(UINT32 FontIndex)
     DeleteVideoObject(FontObjs[FontIndex]);
     FontObjs[FontIndex] = NULL;
 }
+
+static INT16 GetFontCellIndex(HVOBJECT font, UINT16 siChar);
+static INT16 GetFontCellIndex2(HVOBJECT first, HVOBJECT second, UINT16 siChar);
 
 // GetWidth
 //	Returns the width of a given character in the font.
@@ -343,7 +405,7 @@ INT16 StringNPixLength(CHAR16* string, UINT32 uiMaxCount, INT32 UseFont)
     curletter = string;
 
     while ((*curletter) != L'\0' && uiCharCount < uiMaxCount) {
-        transletter = GetIndex((*curletter++));
+        transletter = GetFontCellIndex(FontObjs[UseFont], (*curletter++));
         Cur += GetWidth(FontObjs[UseFont], transletter);
         uiCharCount++;
     }
@@ -366,7 +428,7 @@ INT16 StringPixLength(CHAR16* string, INT32 UseFont)
     curletter = string;
 
     while ((*curletter) != L'\0') {
-        transletter = GetIndex((*curletter++));
+        transletter = GetFontCellIndex(FontObjs[UseFont], (*curletter++));
         Cur += GetWidth(FontObjs[UseFont], transletter);
     }
     return ((INT16)Cur);
@@ -464,6 +526,49 @@ INT16 GetIndex(UINT16 siChar)
     return 0;
 }
 
+/* Mod (safety net): bounds-checked font cell for a character. The translation
+   table is shared by all fonts (252 entries; the translation's Cyrillic in
+   184..249), but many fonts have fewer cells (SmallFont, LargeFont,
+   ButtonFont, Calligraphy* - 93). Without the check such a character read
+   pETRLEObject[] past the end of the array (garbage width, crash in the blitter).
+   Now it is drawn as '?' (or cell 0 if that is missing too). For characters
+   that the font does have, the result is the same as GetIndex. */
+static INT16 GetFontCellIndex(HVOBJECT font, UINT16 siChar)
+{
+    INT16 index = GetIndex(siChar);
+    if (font != NULL && (index < 0 || (UINT16)index >= font->usNumberOfObjects)) {
+        index = GetIndex(L'?');
+        if (index < 0 || (UINT16)index >= font->usNumberOfObjects) {
+            index = 0;
+        }
+    }
+    return index;
+}
+
+BOOLEAN FontHasCellsForString(INT32 iFont, const CHAR16* string)
+{
+    if (iFont < 0 || iFont >= MAX_FONTS || FontObjs[iFont] == NULL || string == NULL) {
+        return TRUE;
+    }
+    for (; *string != 0; ++string) {
+        INT16 index = GetIndex(*string);
+        if (index < 0 || (UINT16)index >= FontObjs[iFont]->usNumberOfObjects) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* For gprintf_buffer: there the width comes from FontType, but drawing uses FontDefault. */
+static INT16 GetFontCellIndex2(HVOBJECT first, HVOBJECT second, UINT16 siChar)
+{
+    INT16 index = GetFontCellIndex(first, siChar);
+    if (second != NULL && (UINT16)index >= second->usNumberOfObjects) {
+        index = 0;
+    }
+    return index;
+}
+
 // SetFont
 //	Sets the current font number.
 
@@ -530,7 +635,7 @@ UINT32 mprintf(INT32 x, INT32 y, CHAR16* pFontString, ...)
     pDestBuf = LockVideoSurface(FontDestBuffer, &uiDestPitchBYTES);
 
     while ((*curletter) != 0) {
-        transletter = GetIndex((*curletter++));
+        transletter = GetFontCellIndex(FontObjs[FontDefault], (*curletter++));
 
         if (FontDestWrap &&
             BltIsClipped(FontObjs[FontDefault], destx, desty, transletter, &FontDestRegion)) {
@@ -644,7 +749,7 @@ UINT32 gprintf(INT32 x, INT32 y, CHAR16* pFontString, ...)
     pDestBuf = LockVideoSurface(FontDestBuffer, &uiDestPitchBYTES);
 
     while ((*curletter) != 0) {
-        transletter = GetIndex((*curletter++));
+        transletter = GetFontCellIndex(FontObjs[FontDefault], (*curletter++));
 
         if (FontDestWrap &&
             BltIsClipped(FontObjs[FontDefault], destx, desty, transletter, &FontDestRegion)) {
@@ -696,7 +801,7 @@ UINT32 gprintfDirty(INT32 x, INT32 y, CHAR16* pFontString, ...)
     pDestBuf = LockVideoSurface(FontDestBuffer, &uiDestPitchBYTES);
 
     while ((*curletter) != 0) {
-        transletter = GetIndex((*curletter++));
+        transletter = GetFontCellIndex(FontObjs[FontDefault], (*curletter++));
 
         if (FontDestWrap &&
             BltIsClipped(FontObjs[FontDefault], destx, desty, transletter, &FontDestRegion)) {
@@ -753,7 +858,8 @@ UINT32 gprintf_buffer(UINT8* pDestBuf, UINT32 uiDestPitchBYTES, UINT32 FontType,
     desty = y;
 
     while ((*curletter) != 0) {
-        transletter = GetIndex((*curletter++));
+        transletter =
+            GetFontCellIndex2(FontObjs[FontType], FontObjs[FontDefault], (*curletter++));
 
         if (FontDestWrap &&
             BltIsClipped(FontObjs[FontType], destx, desty, transletter, &FontDestRegion)) {
@@ -799,7 +905,7 @@ UINT32 mprintf_buffer(UINT8* pDestBuf, UINT32 uiDestPitchBYTES, UINT32 FontType,
     desty = y;
 
     while ((*curletter) != 0) {
-        transletter = GetIndex((*curletter++));
+        transletter = GetFontCellIndex(FontObjs[FontDefault], (*curletter++));
 
         if (FontDestWrap &&
             BltIsClipped(FontObjs[FontDefault], destx, desty, transletter, &FontDestRegion)) {
@@ -1443,6 +1549,47 @@ FontTranslationTable* CreateEnglishTransTable()
     *temp = 161; // inverted exclamation mark
 
     return pTable;
+}
+
+/* Mod (Russian translation): see Font.h. */
+BOOLEAN gfCyrillicText = FALSE;
+
+/* The translation's exe (Wizardry8_rus 1.2.6) was built from sources with a different
+   CreateEnglishTransTable (there at address 0x407f70, GOG's at 0x407ec0):
+     cells  93..148  (accented Latin letters) -> 0 (character unused);
+     cells 149..153  (target icons 0xFFF0..0xFFF4) - unchanged;
+     cells 184..249  -> А..Е Ё Ж..Я а..е ё ж..я as cp1251 codes;
+     cells 250, 251  (¿ ¡) -> 0.
+   Its fonts Data\Fonts\*.sti (in the translation's DATA.SLF) have 252 cells,
+   with Cyrillic drawn exactly in 184..249. Game text is cp1251 bytes, which
+   are simply zero-extended when converted to wchar_t (0xC0 -> 0x00C0), so
+   the table holds "cp1251 codes", not Unicode. */
+void UseCyrillicFontTranslation(void)
+{
+    UINT16* table;
+    UINT16 index;
+    UINT16 letter;
+
+    if (pFManager == NULL || pFManager->pTranslationTable == NULL ||
+        pFManager->pTranslationTable->usNumberOfSymbols < 252) {
+        return;
+    }
+    table = pFManager->pTranslationTable->DynamicArrayOf16BitValues;
+    for (index = 93; index <= 148; index++) {
+        table[index] = 0;
+    }
+    index = 184;
+    for (letter = 0xC0; letter <= 0xFF; letter++) {
+        table[index++] = letter;
+        if (letter == 0xC5) { // after "Е" (Ye) comes "Ё" (Yo)
+            table[index++] = 0xA8;
+        } else if (letter == 0xE5) { // after "е" (ye) comes "ё" (yo)
+            table[index++] = 0xB8;
+        }
+    }
+    table[250] = 0;
+    table[251] = 0;
+    gfCyrillicText = TRUE;
 }
 // LoadFontFile
 // Parameter List : filename - File created by the utility tool to open

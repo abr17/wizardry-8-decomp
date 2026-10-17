@@ -48,6 +48,8 @@
 #include "wiz8/local_code/MagicEffects.h"
 #include "wiz8/fonts.h"
 #include "wiz8/local_screens/MGSKeyboard.h"
+#include "wiz8/local_screens/MainGameLayout.h"
+#include "wiz8/canvas.h"
 #include "input.h"
 #include "Types.h"
 #include "FileMan.h"
@@ -70,6 +72,74 @@
 
 // GLOBAL: WIZ8 0x0068F258
 W8Vector<W8AutomapNote*>* g_automap_notes;
+
+/* ---- Mod: wide map (wide canvas, 2026-10-12) ----
+   While the map is open on a canvas wider than 640 (and [Canvas] WideAutomap=1), the canvas
+   layout A is on (canvas.h): the mouse sees the whole canvas, the right button column
+   is pinned to the right edge, and the map field is stretched by ox on both sides:
+   game x from 12-ox to 467+ox (12..467 in the original, 455 pixels). The scale is the
+   same (pixels per world unit), just more of the map is visible at the sides: the width
+   of the visible world = zoom * (455+2ox)/455, the height - zoom, as before. With ox = 0
+   all functions below return the original's numbers. */
+extern float g_automap_zoom; /* defined below */
+
+static int AutomapWideOx(void)
+{
+    return CanvasWideLayoutActive() ? g_canvas_ox : 0;
+}
+
+/* Left and right (exclusive) bounds of the map field in game x, width in pixels. */
+static int AutomapViewLeft(void)
+{
+    return 0xc - AutomapWideOx();
+}
+
+static int AutomapViewRight(void)
+{
+    return 0x1d3 + AutomapWideOx();
+}
+
+static float AutomapViewPixels(void)
+{
+    return static_cast<float>(455 + 2 * AutomapWideOx());
+}
+
+/* Width of the visible world in x (in y - g_automap_zoom). */
+static float AutomapWorldWidth(void)
+{
+    int ox = AutomapWideOx();
+    if (ox == 0) {
+        return g_automap_zoom;
+    }
+    return g_automap_zoom * (static_cast<float>(455 + 2 * ox) / 455.0f);
+}
+
+/* Map frame (catalog 0x14a, 640x480) over the whole canvas: the left part at the left edge,
+   the letter N above the middle of the field, the right column at the right edge; gaps ox wide
+   are filled by repeating the smooth piece of the frame [150, 210) (top and bottom of the frame,
+   the middle is transparent - the field is there). */
+static void DrawAutomapBorderWide(void)
+{
+    const int ox = g_canvas_ox;
+    enum { N_LEFT = 218, N_RIGHT = 260, SLICE_LEFT = 150, SLICE_RIGHT = 210 };
+    DrawCatalogImagePiece(0x14a, 0, 0, 0, 0, 0, 0, N_LEFT);                  /* canvas 0 .. 218 */
+    DrawCatalogImagePiece(0x14a, 0, 0, 0, 0, ox, N_LEFT, N_RIGHT);           /* N centered */
+    DrawCatalogImagePiece(0x14a, 0, 0, 0, 0, 2 * ox, N_RIGHT, 0x280);        /* to the right edge */
+    const int slice = SLICE_RIGHT - SLICE_LEFT;
+    const int gaps[2] = {N_LEFT, N_RIGHT + ox}; /* where the gaps start on the canvas */
+    for (int gap = 0; gap < 2; ++gap) {
+        for (int start = gaps[gap]; start < gaps[gap] + ox; start += slice) {
+            int width = gaps[gap] + ox - start;
+            if (width > slice) {
+                width = slice;
+            }
+            DrawCatalogImagePiece(0x14a, 0, 0, 0, 0, start - SLICE_LEFT, SLICE_LEFT,
+                                  SLICE_LEFT + width);
+        }
+    }
+    CanvasOriginScope scope(0);
+    InvalidateRegion(0, 0, g_canvas_w, 0x1e0, 0);
+}
 
 // FUNCTION: WIZ8 0x0057e5d0
 unsigned char AutomapScreenInitialize(void)
@@ -488,6 +558,8 @@ void CreateAutomapButtons(void)
                     g_automap_buttons[index]->SetPosition(g_automap_button_positions[index].x,
                                                           g_automap_button_positions[index].y);
                     g_automap_buttons[index]->SetTooltipIndex(g_automap_button_tooltips[index]);
+                    /* Mod: wide map - button column at the right canvas edge. */
+                    g_automap_buttons[index]->SetLayoutAnchor(W8_ANCHOR_RIGHT);
                 }
             }
         }
@@ -636,6 +708,10 @@ unsigned char AutomapScreenEnter(void)
 {
     stScript script;
     MSYS_Init();
+    /* Mod: wide map - canvas layout for the whole time the map screen is open. */
+    if (g_canvas_ox > 0 && CanvasWideAutomapEnabled()) {
+        CanvasSetWideLayout(true);
+    }
     GetLightDirection(&g_automap_saved_light_direction);
     GetWorldLightValue(g_world, &g_automap_saved_ambient_light);
     GetWorldCameraState(GetWorld(), &g_automap_saved_camera);
@@ -673,9 +749,9 @@ unsigned char AutomapScreenEnter(void)
         memset(g_automap_state, 0, sizeof(W8AutomapState));
     }
     g_automap_state->blink_time = GetTickCount();
-    g_automap_viewport.left = 12;
+    g_automap_viewport.left = AutomapViewLeft(); /* mod: 12 - ox */
     g_automap_viewport.top = 32;
-    g_automap_viewport.right = 467;
+    g_automap_viewport.right = AutomapViewRight(); /* mod: 467 + ox */
     g_automap_viewport.bottom = 467;
     PauseMainGameWorld();
     g_automap_layers.Clear();
@@ -713,8 +789,9 @@ unsigned char AutomapScreenEnter(void)
         g_world_render_enabled = 0;
         g_monster_shadow_updates_enabled = 0;
         if (!g_automap_surface) {
-            srColorSurface* surface =
-                SR_NEW(W8ColorSurface)(srPixelConvert::SURFACE_ARGB1555, 640, 480);
+            /* Mod: with the wide map the world snapshot is the whole canvas W x 480. */
+            srColorSurface* surface = SR_NEW(W8ColorSurface)(
+                srPixelConvert::SURFACE_ARGB1555, AutomapWideOx() ? g_canvas_w : 640, 480);
             g_automap_surface = surface;
             if (surface)
                 surface->setFilter(&srBoxFilter);
@@ -723,9 +800,19 @@ unsigned char AutomapScreenEnter(void)
     g_automap_redraw = true;
     g_automap_overlay_redraw = true;
     SetPrimarySurfaceTextureHint2Enabled(false);
-    ClearSurfaceRect(0, 0, 640, 480);
-    DisableCursorScene();
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x14a, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
+    if (AutomapWideOx()) {
+        /* Mod: the whole canvas and the frame across the full width. */
+        {
+            CanvasOriginScope scope(0);
+            ClearSurfaceRect(0, 0, g_canvas_w, 480);
+        }
+        DisableCursorScene();
+        DrawAutomapBorderWide();
+    } else {
+        ClearSurfaceRect(0, 0, 640, 480);
+        DisableCursorScene();
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x14a, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
+    }
     UpdateAutomapPageButtons();
     for (int button = 0; button < 16; ++button) {
         if (g_automap_buttons[button]) {
@@ -737,7 +824,7 @@ unsigned char AutomapScreenEnter(void)
     RenderFrame();
     RenderFrame();
     EnableCursorScene();
-    SetAutomapScaledViewport(12, 32, 467, 467);
+    SetAutomapScaledViewport(AutomapViewLeft(), 32, AutomapViewRight(), 467);
     UpdateAutomapBounds();
     if (script.Load("Data\\Automap\\MapFilters.txt")) {
         W8Vector<char*> excluded_textures(5);
@@ -903,7 +990,7 @@ void AutomapScreenFrame(void)
                         (*g_automap_layers.GetAt(layer))->getLocationY();
                     }
                     srVector2T<float> location;
-                    location.Set((point.x - 0.5f) * g_automap_zoom + g_automap_position.x,
+                    location.Set((point.x - 0.5f) * AutomapWorldWidth() + g_automap_position.x,
                                  g_automap_position.z - (point.y - 0.5f) * g_automap_zoom);
                     g_automap_editing_note = CreateAutomapNote(&location, g_automap_layer, L"_");
                 }
@@ -1052,6 +1139,10 @@ unsigned char AutomapScreenLeave(int)
     }
     delete[] g_automap_buttons;
     g_automap_buttons = 0;
+    /* Mod: wide map - turn the canvas layout off (the strips are erased). */
+    if (AutomapWideOx()) {
+        CanvasSetWideLayout(false);
+    }
     MSYS_Shutdown();
     UpdateHeldItemCursor();
     EnableCursorScene();
@@ -1242,7 +1333,7 @@ void ResetAutomapZoom(void)
 unsigned char ZoomAutomapIn(const srVector3T<float>* point)
 {
     srVector3T<float> position;
-    position.x = (point->x - g_float_half) * g_automap_zoom + g_automap_position.x;
+    position.x = (point->x - g_float_half) * AutomapWorldWidth() + g_automap_position.x;
     position.y = g_automap_top_y;
     position.z = g_automap_position.z - (point->y - g_float_half) * g_automap_zoom;
 
@@ -1539,27 +1630,43 @@ void RenderAutomapFrame(void)
             if (g_automap_overlay_redraw) {
                 SetResidentTexturePolicy(3);
                 float half = g_automap_zoom * g_float_half;
+                float half_x = AutomapWorldWidth() * g_float_half; /* mod: wider by ox */
                 srCamera::Rect view;
-                view.left = static_cast<double>(-half);
+                view.left = static_cast<double>(-half_x);
                 view.bottom = static_cast<double>(-half);
-                view.right = static_cast<double>(half);
+                view.right = static_cast<double>(half_x);
                 view.top = static_cast<double>(half);
                 g_world->camera->setViewPlane(view, static_cast<double>(g_automap_near_clip));
                 g_world->camera->setClipRange(g_automap_near_clip, 1500000.0);
-                RenderWorldToSurface(g_automap_surface, &g_automap_viewport, false);
+                if (AutomapWideOx()) {
+                    RenderWorldToCanvasSurface(g_automap_surface, &g_automap_viewport);
+                } else {
+                    RenderWorldToSurface(g_automap_surface, &g_automap_viewport, false);
+                }
                 g_automap_overlay_redraw = false;
                 SetResidentTexturePolicy(0);
             }
             unsigned int pitch;
-            void* pixels = LockPrimarySurface(&pitch);
-            srColorSurface* surface = SR_NEW(W8ColorSurface)(srPixelConvert::SURFACE_ARGB1555,
-                                                             pixels, 0x280, 0x1e0, pitch);
-            surface->setFilter(&srBoxFilter);
-            surface->blit(0xc, 0x20, *g_automap_surface, 0xc, 0x20, 0x1d3, 0x1d3);
-            surface->release();
+            if (AutomapWideOx()) {
+                /* Mod: world snapshot in canvas coordinates; the field is canvas 12 .. 467+2ox. */
+                void* pixels = LockPrimarySurfaceFull(&pitch);
+                srColorSurface* surface = SR_NEW(W8ColorSurface)(
+                    srPixelConvert::SURFACE_ARGB1555, pixels, g_canvas_w, 0x1e0, pitch);
+                surface->setFilter(&srBoxFilter);
+                int right = AutomapViewRight() + g_canvas_ox;
+                surface->blit(0xc, 0x20, *g_automap_surface, 0xc, 0x20, right, 0x1d3);
+                surface->release();
+            } else {
+                void* pixels = LockPrimarySurface(&pitch);
+                srColorSurface* surface = SR_NEW(W8ColorSurface)(srPixelConvert::SURFACE_ARGB1555,
+                                                                 pixels, 0x280, 0x1e0, pitch);
+                surface->setFilter(&srBoxFilter);
+                surface->blit(0xc, 0x20, *g_automap_surface, 0xc, 0x20, 0x1d3, 0x1d3);
+                surface->release();
+            }
             UnlockPrimarySurface();
             RenderAutomapMarkers();
-            InvalidateRegion(0xc, 0x20, 0x1d3, 0x1d3, 0);
+            InvalidateRegion(AutomapViewLeft(), 0x20, AutomapViewRight(), 0x1d3, 0);
             SetRendererAutoFlipEnabled(false);
             RenderFrame();
             SetRendererAutoFlipEnabled(true);
@@ -1589,7 +1696,19 @@ void UpdateAutomapPageButtons(void)
 // FUNCTION: WIZ8 0x00581280
 int RestoreAutomapRect(W8ScreenRect* rect)
 {
-    if (g_automap_surface != 0) {
+    if (g_automap_surface != 0 && AutomapWideOx()) {
+        /* Mod: wide map - snapshot and surface in canvas coordinates (+ox). */
+        const int ox = g_canvas_ox;
+        unsigned int pitch;
+        void* pixels = LockPrimarySurfaceFull(&pitch);
+        srColorSurface* surface = SR_NEW(W8ColorSurface)(srPixelConvert::SURFACE_ARGB1555, pixels,
+                                                         g_canvas_w, 0x1e0, pitch);
+        surface->setFilter(&srBoxFilter);
+        surface->blit(rect->left + ox, rect->top, *g_automap_surface, rect->left + ox, rect->top,
+                      rect->right + ox, rect->bottom);
+        surface->release();
+        UnlockPrimarySurface();
+    } else if (g_automap_surface != 0) {
         unsigned int pitch;
         void* pixels = LockPrimarySurface(&pitch);
         srColorSurface* surface =
@@ -1622,11 +1741,14 @@ unsigned char ShowAutomapNoteTooltip(W8AutomapNote* note)
     }
     int index = FindAutomapLayerAtHeight(floor_y);
     if (index - 1 == g_automap_layer) {
-        float left = g_automap_position.x - g_automap_zoom * g_float_half;
+        /* Mod: wide map - world and field width from AutomapWorldWidth/ViewPixels. */
+        const float world_width = AutomapWorldWidth();
+        float left = g_automap_position.x - world_width * g_float_half;
         float bottom = g_automap_position.z - g_automap_zoom * g_float_half;
-        if (left <= note->position.x && note->position.x <= left + g_automap_zoom &&
+        if (left <= note->position.x && note->position.x <= left + world_width &&
             bottom <= note->position.y && note->position.y <= bottom + g_automap_zoom) {
-            int screen_x = static_cast<int>((note->position.x - left) / g_automap_zoom * -455.0f);
+            int screen_x =
+                static_cast<int>((note->position.x - left) / world_width * -AutomapViewPixels());
             int screen_y =
                 static_cast<int>((1.0f - (note->position.y - bottom) / g_automap_zoom) * -435.0f);
             int marker_width;
@@ -1641,17 +1763,17 @@ unsigned char ShowAutomapNoteTooltip(W8AutomapNote* note)
             W8ScreenRect rect;
             rect.top =
                 (0x20 - screen_y) - ((unsigned)GetFontHeight(g_wiz_text_font_secondary) >> 1);
-            rect.left = marker_width / 2 + (0xe - screen_x);
+            rect.left = marker_width / 2 + (AutomapViewLeft() + 2 - screen_x);
             rect.bottom = rect.top + GetFontHeight(g_wiz_text_font_secondary) + 3;
             rect.right = StringPixLength(note->text, g_wiz_text_font_secondary) + 3 + rect.left;
-            if (rect.left < 0xc) {
-                rect.left = 0xc;
+            if (rect.left < AutomapViewLeft()) {
+                rect.left = AutomapViewLeft();
             }
             if (rect.top < 0x20) {
                 rect.top = 0x20;
             }
-            if (0x1d3 < rect.right) {
-                rect.right = 0x1d3;
+            if (AutomapViewRight() < rect.right) {
+                rect.right = AutomapViewRight();
             }
             if (0x1d3 < rect.bottom) {
                 rect.bottom = 0x1d3;
@@ -1772,7 +1894,7 @@ unsigned char GetAutomapPositionUnderCursor(srVector3T<float>* position)
             height = g_automap_grid_min.y;
         }
         position->y = height;
-        position->x = (point.x - g_float_half) * g_automap_zoom + g_automap_position.x;
+        position->x = (point.x - g_float_half) * AutomapWorldWidth() + g_automap_position.x;
         position->z = g_automap_position.z - (point.y - g_float_half) * g_automap_zoom;
         return 1;
     }
@@ -1793,7 +1915,7 @@ W8AutomapNote* FindAutomapNoteUnderCursor(void)
         if (HasAutomapLayer(layer)) {
             (*g_automap_layers.GetAt(layer))->getLocationY();
         }
-        float x = (point.x - g_float_half) * g_automap_zoom + g_automap_position.x;
+        float x = (point.x - g_float_half) * AutomapWorldWidth() + g_automap_position.x;
         float y = g_automap_position.z - (point.y - g_float_half) * g_automap_zoom;
         for (unsigned int index = 0; index < static_cast<unsigned int>(g_automap_notes->GetCount());
              ++index) {
@@ -1832,7 +1954,8 @@ static void CreateAutomapMarkerSprite(const char* path, stModelInstance2D*& mark
     stTextureFile* texture = LoadAutomapMarkerTexture(path);
     srColorSurface* surface = texture->getSurface();
     if (surface != 0) {
-        marker = CreateSpriteFromTexture(texture, surface->getWidth() * g_viewport_x_scale,
+        /* Wide canvas: sprite widths are fractions of the canvas width W. */
+        marker = CreateSpriteFromTexture(texture, surface->getWidth() * CanvasSpriteScaleX(),
                                          surface->getHeight() * g_viewport_y_scale, true, false);
         static_cast<srMeshModel*>(marker->getModel())
             ->enable(srMeshModel::CONTROL_SORTED_RENDERING);
@@ -1853,8 +1976,9 @@ void CreateAutomapMarkerSprites(void)
         srColorSurface* surface = texture->getSurface();
         if (surface != 0) {
             g_automap_party_marker =
-                CreateSpriteFromTexture(texture, surface->getWidth() * g_viewport_x_scale,
-                                        surface->getHeight() * g_viewport_x_scale, true, true);
+                /* Wide canvas: square scene, both axes in fractions of W. */
+                CreateSpriteFromTexture(texture, surface->getWidth() * CanvasSpriteScaleX(),
+                                        surface->getHeight() * CanvasSpriteScaleX(), true, true);
             g_automap_party_marker->setParent(g_scene_square, 1);
             static_cast<srMeshModel*>(g_automap_party_marker->getModel())
                 ->enable(srMeshModel::CONTROL_SORTED_RENDERING);
@@ -1892,15 +2016,20 @@ void RenderAutomapMarkers(void)
 {
     bool detect_all = PartyHasCondition(0x40);
     ClearAutomapMarkers();
-    float left = g_automap_position.x - g_automap_zoom * g_float_half;
+    /* Mod: wide map - in x a world of width world_width maps onto a field
+       view_pixels wide starting at view_left (with ox = 0: zoom, 455, 12). */
+    const float world_width = AutomapWorldWidth();
+    const float view_pixels = AutomapViewPixels();
+    const int view_left = AutomapViewLeft();
+    float left = g_automap_position.x - world_width * g_float_half;
     srVector3T<float> point(g_automap_saved_camera.position.x, 1.0f,
                             g_automap_saved_camera.position.z);
     float top = g_automap_position.z - g_automap_zoom * g_float_half;
-    if (point.x < left || left + g_automap_zoom < point.x || point.z < top ||
+    if (point.x < left || left + world_width < point.x || point.z < top ||
         top + g_automap_zoom < point.z) {
         g_automap_party_marker->setFlag(srNode::FLAG_DISABLE);
     } else {
-        int x = 0xc - static_cast<int>((point.x - left) / g_automap_zoom * -455.0f);
+        int x = view_left - static_cast<int>((point.x - left) / world_width * -view_pixels);
         int y = 0x20 - static_cast<int>((1.0f - (point.z - top) / g_automap_zoom) * -435.0f);
         float factor = (g_float_one / (g_automap_zoom * 0.00004f)) * 0.44f;
         srVector3T<double> scale(factor, factor, factor);
@@ -1929,13 +2058,13 @@ void RenderAutomapMarkers(void)
         FindAutomapLayerAtHeight(location.y);
         if (g_automap_show_all_monsters || detect_all ||
             (!monster->disabled && info->party_threat.sight_state == W8_SIGHT_SEEN)) {
-            left = g_automap_position.x - g_automap_zoom * g_float_half;
+            left = g_automap_position.x - world_width * g_float_half;
             top = g_automap_position.z - g_automap_zoom * g_float_half;
-            if (location.x < left || left + g_automap_zoom < location.x || location.z < top ||
+            if (location.x < left || left + world_width < location.x || location.z < top ||
                 top + g_automap_zoom < location.z) {
                 continue;
             }
-            int x = 0xc - static_cast<int>((location.x - left) / g_automap_zoom * -455.0f);
+            int x = view_left - static_cast<int>((location.x - left) / world_width * -view_pixels);
             int y = 0x20 - static_cast<int>((1.0f - (location.z - top) / g_automap_zoom) * -435.0f);
             stModelInstance2D* marker;
             switch (info->ubDisposition) {
@@ -1971,13 +2100,13 @@ void RenderAutomapMarkers(void)
              (static_cast<W8ItemRep*>(item->m_pRep)->flags & W8_ITEM_ENTITY_RADAR_SEEN) != 0 ||
              HasCameraLineOfSight(&location)) &&
             layer - 1 == g_automap_layer) {
-            left = g_automap_position.x - g_automap_zoom * g_float_half;
+            left = g_automap_position.x - world_width * g_float_half;
             top = g_automap_position.z - g_automap_zoom * g_float_half;
-            if (location.x < left || left + g_automap_zoom < location.x || location.z < top ||
+            if (location.x < left || left + world_width < location.x || location.z < top ||
                 top + g_automap_zoom < location.z) {
                 continue;
             }
-            int x = 0xc - static_cast<int>((location.x - left) / g_automap_zoom * -455.0f);
+            int x = view_left - static_cast<int>((location.x - left) / world_width * -view_pixels);
             int y = 0x20 - static_cast<int>((1.0f - (location.z - top) / g_automap_zoom) * -435.0f);
             stModelInstance2D* marker = CreateAutomapItemMarker(world_item->item.iItemNo);
             if (marker != 0) {
@@ -1989,13 +2118,18 @@ void RenderAutomapMarkers(void)
         }
     }
     if (g_automap_page != 2) {
+        /* Mod: wide map - notes are drawn with window origin 0 (canvas x):
+           field 12 .. 467+2ox, drawing x = game x + shift. With ox = 0
+           shift = 0 and the window origin is unchanged - as in the original. */
+        const int shift = AutomapWideOx();
+        CanvasOriginScope note_scope(shift != 0 ? 0 : CanvasDrawOrigin());
         SGPRect saved_clip;
         GetClippingRect(&saved_clip);
-        SGPRect clip = {0xc, 0x20, 0x1d3, 0x1d3};
+        SGPRect clip = {0xc, 0x20, 0x1d3 + 2 * shift, 0x1d3};
         SetClippingRect(&clip);
         SetFont(g_wiz_text_font_secondary);
         SetObjectShade(g_wiz_text_font_secondary_object, 4);
-        SetFontDestClip(0xc, 0x20, 0x1d3, 0x1d3);
+        SetFontDestClip(0xc, 0x20, 0x1d3 + 2 * shift, 0x1d3);
         int font_height = GetFontHeight(g_wiz_text_font_secondary);
         unsigned int count = g_automap_notes->GetCount();
         for (unsigned int index = 0; index < count; ++index) {
@@ -2004,13 +2138,15 @@ void RenderAutomapMarkers(void)
             if (HasAutomapLayer(layer)) {
                 (*g_automap_layers.GetAt(layer))->getLocationY();
             }
-            left = g_automap_position.x - g_automap_zoom * g_float_half;
+            left = g_automap_position.x - world_width * g_float_half;
             top = g_automap_position.z - g_automap_zoom * g_float_half;
-            if (note->position.x < left || left + g_automap_zoom < note->position.x ||
+            if (note->position.x < left || left + world_width < note->position.x ||
                 note->position.y < top || top + g_automap_zoom < note->position.y) {
                 continue;
             }
-            int x = 0xc - static_cast<int>((note->position.x - left) / g_automap_zoom * -455.0f);
+            int x = view_left -
+                    static_cast<int>((note->position.x - left) / world_width * -view_pixels) +
+                    shift;
             int y = 0x20 -
                     static_cast<int>((1.0f - (note->position.y - top) / g_automap_zoom) * -435.0f);
             stModelInstance2D* marker = CreateAutomapTextMarker();
@@ -2035,7 +2171,8 @@ void RenderAutomapMarkers(void)
                         marker->setScale(srVector3T<double>(0.22f, 0.22f, 0.22f));
                         unsigned int pitch;
                         char* buffer = static_cast<char*>(LockPrimarySurface(&pitch));
-                        SetClippingRegionAndImageWidth(pitch, 0xc, 0x20, 0x1c7, 0x1b3);
+                        SetClippingRegionAndImageWidth(pitch, 0xc, 0x20, 0x1c7 + 2 * shift,
+                                                       0x1b3);
                         int color = Get16BPPColor(0x569bef);
                         int length = StringPixLength(note->text, g_wiz_text_font_secondary);
                         RectangleDraw(TRUE, x - 1, y, x + length + 2, y + (font_height & 0xffff),
@@ -2080,7 +2217,7 @@ stModelInstance2D* CreateAutomapItemMarker(int item_id)
                                   GetCatalogVideoObjectYOffset(object), surface, x, y);
     float factor = (g_float_one / (g_automap_zoom * 0.00004f)) * 0.44f;
     stModelInstance2D* marker = static_cast<stModelInstance2D*>(
-        MakePolygonBrush(g_scene_fullscreen, surface, surface->getWidth() * g_viewport_x_scale,
+        MakePolygonBrush(g_scene_fullscreen, surface, surface->getWidth() * CanvasSpriteScaleX(),
                          surface->getHeight() * g_viewport_y_scale, 0.0f, 0.0f, 1.0f, 1.0f, 1));
     if (marker == 0) {
         return 0;
@@ -2183,7 +2320,7 @@ unsigned char HandleAutomapNoteInput(const InputAtom* input)
                     (*g_automap_layers.GetAt(layer))->getLocationY();
                 }
                 g_automap_editing_note->position.Set(
-                    (point.x - g_float_half) * g_automap_zoom + g_automap_position.x,
+                    (point.x - g_float_half) * AutomapWorldWidth() + g_automap_position.x,
                     g_automap_position.z - (point.y - g_float_half) * g_automap_zoom);
                 g_automap_redraw = true;
             }
@@ -2219,7 +2356,7 @@ unsigned char HandleAutomapNoteInput(const InputAtom* input)
             }
             if (g_automap_tool != 0) {
                 g_automap_tool = 0;
-                SetAutomapCursorImage(0);
+                SetAutomapToolCursor(0); /* retail inlines it (tool 0: zoom cursor) */
             }
             g_automap_editing_note = 0;
             g_automap_redraw = true;
@@ -2234,7 +2371,7 @@ unsigned char HandleAutomapNoteInput(const InputAtom* input)
             g_automap_redraw = true;
             if (g_automap_tool != 0) {
                 g_automap_tool = 0;
-                SetAutomapCursorImage(0);
+                SetAutomapToolCursor(0); /* retail inlines it (tool 0: zoom cursor) */
             }
         }
     }
@@ -2244,7 +2381,7 @@ unsigned char HandleAutomapNoteInput(const InputAtom* input)
     }
     if (g_automap_tool != 0) {
         g_automap_tool = 0;
-        SetAutomapCursorImage(0);
+        SetAutomapToolCursor(0); /* retail inlines it (tool 0: zoom cursor) */
     }
     return 1;
 }

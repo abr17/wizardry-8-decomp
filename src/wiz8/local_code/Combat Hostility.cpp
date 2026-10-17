@@ -50,7 +50,10 @@ void RecountCombatMonsters(void)
             if (monster->ubDisposition == W8_DISPOSITION_HOSTILE) {
                 ++gXStatus.hostile_monster_count;
             }
+            /* Retail 0x00546EBC: a turncoat monster (condition 13 set) bumps
+               hostile_group_count (0x006850BE), which keeps combat going. */
             if (monster->uiCondition[W8_CONDITION_TURNCOAT] != 0) {
+                ++gXStatus.hostile_group_count;
             }
         }
     }
@@ -364,8 +367,16 @@ bool CombatAllowsLiveGroups(void)
 static unsigned short g_group_hostility_notice_ids[3] = {511, 512, 513};
 
 // GLOBAL: WIZ8 0x0061ec14
-int g_monster_special_attack_name_ids[12] = {0,    1598, 1599, 1600, 1601, 1602,
-                                             1603, 1604, 1605, 1606, 1607, 1608};
+// Indexed by the monster record's special_attack_kind (0..31, no bounds check
+// in retail). Retail holds 30 dwords here (0, 1598..1626); kinds 30 and 31
+// (used by MONSTERS.DBS, e.g. Acid Wing / Lorrac) read on into the next two
+// retail dwords, 0x65b (g_breath_notice_id, 0x0061ec8c) and 0x65c, so those
+// values are copied in too. The decomp used to declare only 12 entries, which
+// read unrelated globals (crash on kind 12).
+int g_monster_special_attack_name_ids[32] = {
+    0,    1598, 1599, 1600, 1601, 1602, 1603, 1604, 1605, 1606, 1607,
+    1608, 1609, 1610, 1611, 1612, 1613, 1614, 1615, 1616, 1617, 1618,
+    1619, 1620, 1621, 1622, 1623, 1624, 1625, 1626, 1627, 1628};
 
 // FUNCTION: WIZ8 0x00547540
 void SetMonsterGroupHostilityByID(int group_id, unsigned int hostility, bool recurse)
@@ -619,9 +630,11 @@ int CharacterPrayAction(int party_slot)
     } else if (g_combat_state->round_count > 8) {
         roll += Random(10);
     }
-    if (g_settings.difficulty == W8_DIFFICULTY_NOVICE) {
+    /* Retail 0x00548211: biased by the per-fight rating gXStatus.combat_difficulty
+       (0x006850B4; 0 easy, 2 lousy), not by the g_settings.difficulty option. */
+    if (gXStatus.combat_difficulty == 0) {
         roll -= 10;
-    } else if (g_settings.difficulty == W8_DIFFICULTY_EXPERT) {
+    } else if (gXStatus.combat_difficulty == 2) {
         roll += 10;
     }
     action = 0;
@@ -662,11 +675,15 @@ int CharacterPrayAction(int party_slot)
             break;
         case 2:
             found = false;
+            /* Retail 0x005482C9 never zeroes this counter, so a first-pass case 2
+               counts on stale stack; the port zeroes it deliberately. */
             in_range = 0;
             for (index = 0; index < 8; ++index) {
                 W8Character* member = &g_status.buffers.Char[index];
+                /* Retail 0x005482F6 / 0x0054835E: Guardian Angel is tested by
+                   enchantments[2].turns (+0xa85), not .power. */
                 if (CanPartySlotParticipate(index) &&
-                    member->enchantments[W8_ENCHANTMENT_GUARDIAN_ANGEL].power == 0) {
+                    member->enchantments[W8_ENCHANTMENT_GUARDIAN_ANGEL].turns == 0) {
                     ++in_range;
                     found = true;
                 }
@@ -676,7 +693,7 @@ int CharacterPrayAction(int party_slot)
                 for (index = 0; index < 8; ++index) {
                     W8Character* member = &g_status.buffers.Char[index];
                     if (CanPartySlotParticipate(index) &&
-                        member->enchantments[W8_ENCHANTMENT_GUARDIAN_ANGEL].power == 0 &&
+                        member->enchantments[W8_ENCHANTMENT_GUARDIAN_ANGEL].turns == 0 &&
                         --pick == 0) {
                         AppendToLastTextLine(
                             FormatWideString(gppStringList[0x17a], member->name, -1), -1);
@@ -743,6 +760,9 @@ int CharacterPrayAction(int party_slot)
                 prayed = true;
                 break;
             }
+            /* Retail 0x00548245 / 0x005484F6 does not reset 'found' and starts 'best'
+               from uninitialized stack, so after case 5 sees an active Bless it
+               compares against or targets a garbage index. Intentionally not reproduced. */
             best = -1;
             for (index = 0; index < 8; ++index) {
                 W8Character* member = &g_status.buffers.Char[index];

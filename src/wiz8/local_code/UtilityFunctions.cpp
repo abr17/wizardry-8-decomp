@@ -1,4 +1,5 @@
 #include "wiz8/utility.h"
+#include "wiz8/canvas.h"
 #include "wiz8/sgp_text.h"
 #include "wiz8/xstatus.h"
 #include "wiz8/layouts/character.h"
@@ -24,6 +25,7 @@
 #include "wiz8/cursor.h"
 #include "wiz8/engine_code/Video2.h"
 #include "Button System.h"
+#include "Font.h"
 #include "input.h"
 #include "DEBUG.H"
 #include "random.h"
@@ -58,7 +60,9 @@ static int g_message_box_font;
 // GLOBAL: WIZ8 0x0068c0ac
 static unsigned int g_message_box_shade;
 // GLOBAL: WIZ8 0x0068c0b0
-static bool g_message_box_accepted;
+/* A BOOLEAN byte: RenderMessageBox tests it with cmp al,1 (0x005189d0), so it is
+   kept as a byte rather than a bool (found by the w8diff harness). */
+static unsigned char g_message_box_accepted;
 // GLOBAL: WIZ8 0x0068BFD0
 static char g_format_string_buffer[200];
 // GLOBAL: WIZ8 0x00689FD0
@@ -283,14 +287,21 @@ float NormalizeAngle(float angle)
                      "C:\\Projects\\Wizardry 8\\Local Code\\UtilityFunctions.cpp", 0x13b, 0);
     }
 
-    angle += 6.2831852;
-    while (angle < 0.0f) {
-        angle += 6.2831852f;
+    /* Retail 0x00517c90..0x00517cd8: the angle is loaded once, the double
+       6.2831852 (0x005ec318) added and the float 2*pi (0x005ec014) added or
+       subtracted on the x87 stack without ever storing back to a float, so the
+       sum keeps double precision: NormalizeAngle(0) is 6.2831852 - 6.2831850052
+       = 1.948e-7, not 0, and long add/subtract runs do not drift. Keep the
+       running value in a double and round once on return (found by the w8diff
+       harness). */
+    double value = static_cast<double>(angle) + 6.2831852;
+    while (value < 0.0f) {
+        value += 6.2831852f;
     }
-    while (angle >= 6.2831852f) {
-        angle -= 6.2831852f;
+    while (value >= 6.2831852f) {
+        value -= 6.2831852f;
     }
-    return angle;
+    return static_cast<float>(value);
 }
 
 // FUNCTION: WIZ8 0x00517ce0
@@ -391,19 +402,33 @@ unsigned int GetRandomPartySlots(int require_primary, int require_secondary,
     unsigned int found = 0;
     unsigned int returned = 0;
     unsigned int slot;
+    unsigned int first_slot;
+    unsigned char skip_byte;
     bool relaxed;
     int index;
 
+    /* Retail 0x00517fb3..0x00517fdd: mov dl,[skip] / neg dl / sbb / and 2 - any
+       nonzero byte starts at slot 2. Read the argument byte itself, through
+       volatile, so a non-canonical bool (0x80, 0xff, 2) is not used as an integer
+       0/1: with memcpy MSVC still folded "? 2 : 0" into "* 2" (found by the w8diff
+       harness). */
+    // reinterpret-ok: the raw argument byte, which is what retail's neg dl sees
+    skip_byte = *reinterpret_cast<const volatile unsigned char*>(&skip_first_two);
+    first_slot = skip_byte != 0 ? 2u : 0u;
     for (index = 0; index < 8; ++index) {
         claimed[index] = 0;
     }
     if (count != 0) {
         for (relaxed = false; !relaxed;) {
-            for (slot = skip_first_two ? 2u : 0u; slot < 8; ++slot) {
+            for (slot = first_slot; slot < 8; ++slot) {
                 W8Character* character = &g_status.buffers.Char[slot];
+                /* Retail 0x0051805b: cmp [..+0xb01],0x12 / jb - the condition test is
+                   unsigned, a negative condition counts as dead (found by the w8diff
+                   harness). */
                 if (g_status.buffers.XChar[slot].fOccupied && slot != excluded_slot &&
                     claimed[slot] == 0 && (character->hp_current != 0 || require_primary == 2) &&
-                    (character->highest_condition < W8_CONDITION_DEAD || require_secondary == 2)) {
+                    (static_cast<unsigned int>(character->highest_condition) < W8_CONDITION_DEAD ||
+                     require_secondary == 2)) {
                     eligible[found] = slot;
                     ++found;
                     claimed[slot] = 1;
@@ -462,11 +487,14 @@ retry:
         matched = false;
         if (g_status.buffers.XChar[slot].fOccupied && static_cast<int>(slot) != excluded_slot) {
             character = &g_status.buffers.Char[slot];
-            if ((character->hp_current > 0 && character->highest_condition < W8_CONDITION_DEAD) ||
+            /* Retail 0x005181a5/0x005181c6: cmp [..+0xb01],0x12 / 0xf with jb - both
+               condition tests are unsigned (found by the w8diff harness). */
+            unsigned int condition = static_cast<unsigned int>(character->highest_condition);
+
+            if ((character->hp_current > 0 && condition < W8_CONDITION_DEAD) ||
                 require_primary == 2) {
                 if (excluded_gender == -1 || excluded_gender != character->gender) {
-                    if (character->highest_condition < W8_CONDITION_ASLEEP ||
-                        require_secondary == 2) {
+                    if (condition < W8_CONDITION_ASLEEP || require_secondary == 2) {
                         matched = true;
                         if (skip == 0) {
                             return slot;
@@ -514,10 +542,13 @@ retry:
     do {
         if (rows[slot].fOccupied) {
             W8Character* character = &characters[slot];
+            /* Retail 0x00518290/0x0051829e: cmp [..+0xb01],0x12 / 0xf with jb - both
+               condition tests are unsigned (found by the w8diff harness). */
+            unsigned int condition = static_cast<unsigned int>(character->highest_condition);
 
-            if ((character->hp_current > 0 && character->highest_condition < W8_CONDITION_DEAD) ||
+            if ((character->hp_current > 0 && condition < W8_CONDITION_DEAD) ||
                 require_primary == 2) {
-                if (character->highest_condition < W8_CONDITION_ASLEEP || require_secondary == 2) {
+                if (condition < W8_CONDITION_ASLEEP || require_secondary == 2) {
                     return slot;
                 }
             }
@@ -591,6 +622,15 @@ bool CreateMessageBox(wchar_t* text, int font, unsigned int shade, bool has_acce
     char filename[32];
     if (g_message_box_state != 0) {
         return false;
+    }
+    /* Russian text (mod): SmallFont/LargeFont have only 93 glyph cells, the
+       Cyrillic letters live in cells 184..249. If the requested font cannot
+       draw the text, use Wiz_Text_Font (252 cells in the Russian data);
+       RenderMessageBox maps it to g_wiz_text_font_object. Retail callers:
+       the character save/load failure boxes (LoadSaveGame.cpp). */
+    if (gfCyrillicText && !FontHasCellsForString(font, text) &&
+        FontHasCellsForString(g_wiz_text_font, text)) {
+        font = g_wiz_text_font;
     }
     unsigned short height = 0x58;
     if (has_accept || has_cancel) {
@@ -763,11 +803,19 @@ void RenderMessageBox(void)
             font = g_wiz_text_font_secondary_object;
         }
         SetObjectShade(font, g_message_box_shade);
+        /* Mod (window layouter): message window centered over the layout. */
+        if (g_message_box_background_button >= 0) {
+            SGPRect area;
+            GetButtonArea(g_message_box_background_button, &area);
+            CanvasZoneOverlay(area.iLeft, area.iTop, area.iRight, area.iBottom);
+        }
         MarkButtonsDirty();
         RenderButtons();
     } else if (g_message_box_state == 3) {
         g_message_box_state = 0;
-        if (g_message_box_accepted && g_message_box_callback != 0) {
+        /* Retail 0x005189d0: cmp al,1 / jne - only an accepted byte of exactly 1
+           runs the callback (found by the w8diff harness). */
+        if (g_message_box_accepted == 1 && g_message_box_callback != 0) {
             void (*callback)(void) = g_message_box_callback;
             g_message_box_callback = 0;
             callback();

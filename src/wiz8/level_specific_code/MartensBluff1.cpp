@@ -81,7 +81,9 @@ void MartensBluff1Setup(void)
     pTrigger = FindTriggerByName("MR101");
     if (pTrigger != 0 && (pTrigger->flags & W8_TRIGGER_POSITIONED) != 0) {
         pTrigger->GetPosition(&trigger_position);
-        if ((trigger_position - position).Length() < g_double_five_hundred) {
+        /* Retail 0x004DEC5A: fcomp 500.0; test ah,1; je skip -> body runs when less OR unordered,
+           so a NaN distance enters the block like retail. */
+        if (!((trigger_position - position).Length() >= g_double_five_hundred)) {
             FindTriggerByName("Lift2Marten2");
             if (GetLocationVarIDByName("LiftArrived") == -1) {
                 CreateLocationVar("LiftArrived", 1);

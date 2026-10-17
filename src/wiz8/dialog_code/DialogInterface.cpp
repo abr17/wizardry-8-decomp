@@ -100,6 +100,7 @@ void DrawDialog(W8DialogBase* dialog)
         srAssertFail("pDialog", DIALOG_INTERFACE_CPP, 0x66, 0);
     }
     dialog->Draw();
+    dialog->ReportZoneOverlay(); /* mod: window layouter - dialog centered */
 }
 
 // FUNCTION: WIZ8 0x005cf550

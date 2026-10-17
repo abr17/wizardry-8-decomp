@@ -414,7 +414,9 @@ unsigned char ReadWorldEnvironment(W8ReadLevelInfo* pInfo, W8World* pWorld)
     WorldSetFarClip(pWorld, pWorld->view_distance);
     distance_scale =
         view_distance < g_octree_cell_scale ? g_environment_near_scale : g_float_one_and_a_half;
-    WorldSetRenderRange(pWorld, distance_scale * pWorld->view_distance);
+    /* Mod: the monsters' "sun shadow" distance follows the render distance. */
+    WorldSetRenderRange(pWorld, static_cast<float>(distance_scale * pWorld->view_distance *
+                                                   WorldGetRenderFarScale(pWorld)));
     pWorld->environment_range_start = environment_range.x;
     pWorld->environment_range_end = environment_range.y;
     pWorld->environment_range_blue = environment_range.z;
@@ -1088,7 +1090,7 @@ unsigned char ReadLevel(W8World* world, int handle, bool use_octree, const char*
     FileRead(info.hFile, &section_count, sizeof(section_count), 0);
     if (section_count == 0) {
         WorldSetFarClip(world, 42500.0f);
-        WorldSetRenderRange(world, 37500.0f);
+        WorldSetRenderRange(world, static_cast<float>(37500.0 * WorldGetRenderFarScale(world))); /* mod */
         if (!IsSkyEnabled()) {
             DisableSky();
         } else {

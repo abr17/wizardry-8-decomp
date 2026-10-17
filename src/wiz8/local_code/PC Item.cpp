@@ -1121,7 +1121,13 @@ unsigned char UseItem(W8Character* character, W8ItemInstance* item, int* out_use
     int event_type;
     int fatigue_cost = -1;
     W8TargetSource target;
-    unsigned char used;
+    /* msvc2022 port: retail keeps `used` in the `character` argument slot
+       (written only at 0x0051E6EE / 0x0051E720, returned whole at 0x0051E74B),
+       so the activate-fail, spent-charge/dose, silenced and failed casting-aid
+       paths return the non-null character pointer: never 0 (0x004EAB52 test
+       eax,eax) and never 1 (0x005A6509 cmp esi,1). 2 is what those callers see;
+       the pointer's low byte could be 0. */
+    unsigned char used W8_RETAIL_STALE(2);
 
     if (!CanCharacterUseItem(character, item->iItemNo)) {
         PostCharacterNotice(party_slot, gppStringList[0x164], GetItemDisplayName(item));
@@ -1131,7 +1137,8 @@ unsigned char UseItem(W8Character* character, W8ItemInstance* item, int* out_use
     if (!CanCharacterActivateItem(character, item)) {
         PostCharacterNotice(party_slot, gppStringList[0x165], GetItemDisplayName(item));
         *out_uses = -1;
-        return 0;
+        /* Retail 0x0051DF7B: jumps to the common exit, returning the stale `used`. */
+        return used;
     }
 
     if (record->quantity_kind == W8_ITEM_QUANTITY_CHARGES && item->uses_or_charges == 0) {
@@ -1145,7 +1152,8 @@ unsigned char UseItem(W8Character* character, W8ItemInstance* item, int* out_use
             character->uiCondition[W8_CONDITION_SILENCED] != 0) {
             PostCharacterNotice(party_slot, gppStringList[0x166]);
             *out_uses = -1;
-            return 0;
+            /* Retail 0x0051E167: common exit, returning the stale `used`. */
+            return used;
         }
 
         /* The one item that is not used on anybody: it hands the level's NPC
@@ -1202,7 +1210,8 @@ unsigned char UseItem(W8Character* character, W8ItemInstance* item, int* out_use
                 PostCharacterNotice(party_slot, gppStringList[0x1f3], GetItemDisplayName(item));
                 PracticeCharacterSkill(character, skill, 1, false);
                 *out_uses = fatigue_cost;
-                return 0;
+                /* Retail 0x0051E3C6: common exit, returning the stale `used`. */
+                return used;
             }
         }
 
@@ -1563,33 +1572,39 @@ void SpendPartyGold(unsigned int amount)
 W8ItemInstance* FindCharacterItemAt(int party_slot, unsigned char origin, unsigned short slot)
 {
     W8Character* character = &g_status.buffers.Char[party_slot];
+    /* Retail compares both as signed (cmp bl,3 / jl at 0x005221ac, cmp di,8 / jl at
+       0x00522277...) and indexes with movsx, so origin 0x80..0xff only asserts 0x14fd and
+       slot 0x8000..0xffff indexes backwards without the upper-bound asserts (found by the
+       w8diff harness). */
+    const signed char slot_type = static_cast<signed char>(origin);
+    const short slot_index = static_cast<short>(slot);
 
-    if (static_cast<signed char>(origin) < 0) {
+    if (slot_type < 0) {
         srAssertFail("bSlotType >= 0", PC_ITEM_CPP, 0x14fd, 0);
     }
-    if (origin >= W8_ITEM_ORIGIN_COUNT) {
+    if (slot_type >= W8_ITEM_ORIGIN_COUNT) {
         srAssertFail("bSlotType < SLOT_TYPE_COUNT", PC_ITEM_CPP, 0x14fe, 0);
     }
-    if (static_cast<short>(slot) < 0) {
+    if (slot_index < 0) {
         srAssertFail("sSlotIndex >= 0", PC_ITEM_CPP, 0x1500, 0);
     }
 
-    switch (origin) {
+    switch (slot_type) {
     case W8_ITEM_ORIGIN_BACKPACK:
-        if (slot >= 8) {
+        if (slot_index >= 8) {
             srAssertFail("sSlotIndex < MAX_CARRY_ITEM_SLOTS", PC_ITEM_CPP, 0x1505, 0);
         }
-        return &character->backpack[slot];
+        return &character->backpack[slot_index];
     case W8_ITEM_ORIGIN_EQUIPPED:
-        if (slot >= 12) {
+        if (slot_index >= 12) {
             srAssertFail("sSlotIndex < SLOT_COUNT", PC_ITEM_CPP, 0x1509, 0);
         }
-        return &character->EquippedItem[slot];
+        return &character->EquippedItem[slot_index];
     case W8_ITEM_ORIGIN_PARTY_POOL:
-        if (slot >= 500) {
+        if (slot_index >= 500) {
             srAssertFail("sSlotIndex < MAX_PARTY_ITEM_SLOTS", PC_ITEM_CPP, 0x150d, 0);
         }
-        return &g_status.party_item_pool[slot];
+        return &g_status.party_item_pool[slot_index];
     }
     return 0;
 }
@@ -1725,16 +1740,15 @@ void ReleaseGenericItemNames(void)
 
 /* Hand the item in hand to a party member. It is first offered to everybody who
    could identify it, and then stored with the character or the party pool in
-   the order the flag asks for. The item-in-hand state is cleared before the
-   outcome is tested, and a store that fails is announced: the notice names the
-   slot when neither destination was open, and the item otherwise. The flag
-   doubles as the result, so a failed party-first attempt still reports
-   success. */
+   the order the flag asks for. Only a store that succeeded releases the cursor
+   (0x51bb85 is reached solely after a store call returned nonzero); a refused
+   item stays in hand and is announced: the notice names the slot when it
+   cannot take items and the pool was not offered, and the item otherwise. */
 // FUNCTION: WIZ8 0x0051ba00
 bool GiveHeldItemToCharacterOrParty(int uiChar, bool party_first)
 {
     W8ItemInstance* item = &g_status.item_in_hand;
-    bool stored = party_first;
+    bool stored = false;
     bool identified = false;
     unsigned int slot;
 
@@ -1771,10 +1785,10 @@ bool GiveHeldItemToCharacterOrParty(int uiChar, bool party_first)
 
     if (IsPartySlotEligible(uiChar)) {
         W8Character* character = &g_status.buffers.Char[uiChar];
-        if (StoreItemWithCharacterOrParty(character, item, party_first, true, false)) {
-            stored = true;
-        }
-    } else if (stored) {
+        /* Retail 0x51bb46/0x51bb60: when every store refuses, the party-first
+           flag does not count as success; control goes to the notice 0x51bba1. */
+        stored = StoreItemWithCharacterOrParty(character, item, party_first, true, false);
+    } else if (party_first) {
         stored = AddItemToParty(item, true, false);
     }
 
@@ -2058,9 +2072,12 @@ bool PartyAttemptsToIdentifyItem(W8ItemInstance* item, int)
         return false;
     }
     for (party_slot = 0; party_slot < 8; ++party_slot) {
+        /* Retail tests the condition unsigned (cmp [eax+0xb01],0xb / jae at 0x00520a28),
+           so a negative one skips the character; found by the w8diff harness. */
         if (g_status.buffers.XChar[party_slot].fOccupied &&
             g_status.buffers.Char[party_slot].hp_current != 0 &&
-            g_status.buffers.Char[party_slot].highest_condition < W8_CONDITION_INSANE) {
+            static_cast<unsigned int>(g_status.buffers.Char[party_slot].highest_condition) <
+                W8_CONDITION_INSANE) {
             if (!result) {
                 result = TryIdentifyItemFor(&g_status.buffers.Char[party_slot], item);
             } else {
@@ -2484,26 +2501,32 @@ bool EveryCharacterHasItem(int item_id, int include_backpack)
 bool FindCharacterItemByDatabaseKind(W8Character* character, short item_kind, W8ItemInstance** out,
                                      int include_backpack)
 {
+    /* Retail compares the two 16-bit words (cmp word ptr [rec+0x3f],di at 0x005213ef), so a
+       negative kind matches the same unsigned name index. */
+    const unsigned short kind = static_cast<unsigned short>(item_kind);
     for (int slot = 0; slot < 12; ++slot) {
         W8ItemInstance* item = &character->EquippedItem[slot];
         if (item->iItemNo != -1 &&
-            g_item_records[item->iItemNo].unidentified_name_index == item_kind) {
+            g_item_records[item->iItemNo].unidentified_name_index == kind) {
             if (out != 0) {
                 *out = item;
             }
             return true;
         }
     }
-    if (include_backpack != 0) {
-        for (int slot = 0; slot < 8; ++slot) {
-            W8ItemInstance* item = &character->backpack[slot];
-            if (item->iItemNo != -1 &&
-                g_item_records[item->iItemNo].unidentified_name_index == item_kind) {
-                if (out != 0) {
-                    *out = item;
-                }
-                return true;
+    /* Without the backpack retail returns at once and leaves *out untouched
+       (0x005213ff -> 0x00521479); found by the w8diff harness. */
+    if (include_backpack == 0) {
+        return false;
+    }
+    for (int slot = 0; slot < 8; ++slot) {
+        W8ItemInstance* item = &character->backpack[slot];
+        if (item->iItemNo != -1 &&
+            g_item_records[item->iItemNo].unidentified_name_index == kind) {
+            if (out != 0) {
+                *out = item;
             }
+            return true;
         }
     }
     if (out != 0) {
@@ -2545,7 +2568,10 @@ bool TryIdentifyItemFor(W8Character* character, W8ItemInstance* item)
     if (item == 0) {
         srAssertFail("pPCItem", PC_ITEM_CPP, 4014, 0);
     }
-    if (character->hp_current == 0 || character->highest_condition >= W8_CONDITION_INSANE) {
+    /* Unsigned condition test as in retail (cmp [ebp+0xb01],0xb / jae at 0x0052092a); found
+       by the w8diff harness. */
+    if (character->hp_current == 0 ||
+        static_cast<unsigned int>(character->highest_condition) >= W8_CONDITION_INSANE) {
         return false;
     }
 
@@ -3742,7 +3768,9 @@ int CastItemSpell(W8Character* character, W8ItemInstance* item, unsigned int pow
     }
 
     SetTargetSourceToCharacter(party_slot, &target);
-    target.item_cast = 1;
+    /* Retail 0x0051EF74: mov byte [esp+0x49],1 with esp=E-0x64 writes target+0x19
+       (name_known), so the spell engine keeps the precomputed spell_difficulty. */
+    target.name_known = 1;
     TrackItemSpellSource(character, spell_id);
 
     if (skill == W8_SKILL_THROWING_SLING) {

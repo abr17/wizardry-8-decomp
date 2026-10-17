@@ -32,6 +32,10 @@
 #include "vsurface.h"
 
 #include <wchar.h>
+#include <string.h>
+
+#include "wiz8/canvas.h"
+#include "wiz8/wide_art.h"
 
 /* The screen's own state. */
 // GLOBAL: WIZ8 0x0069c4ba
@@ -106,6 +110,32 @@ unsigned char DrawMainMenuItem(short item, short state)
         return 0;
     }
 
+    /* Mod (2026-10-12): the menu item images (Data\Options\introtext_*.sti) in
+       the original are opaque strips with a baked-in piece of the menu background; on the new
+       wide background they show up as rectangles. The patch puts versions with a
+       transparent background next to them (a since-removed art script), so before an item
+       the background under it is restored - otherwise the highlight leaves a halo. With
+       the original's opaque images this changes nothing. */
+    {
+        short width = 0;
+        short height = 0;
+        GetCatalogImageSize(0xea, 0, slot, &width, &height);
+        int right = 0x98 + static_cast<unsigned short>(width);
+        int image_bottom = top + static_cast<unsigned short>(height);
+        if (!RestoreWideFullscreenArtRect("Data\\Options\\intro_bg_text.sti", 0x98, top, right,
+                                          image_bottom)) {
+            /* W = 640 or no wide pair: the same piece of the original background. */
+            blt_vs_fx fx;
+            memset(&fx, 0, sizeof(fx));
+            fx.SrcRect.iLeft = 0x98;
+            fx.SrcRect.iTop = top;
+            fx.SrcRect.iRight = right;
+            fx.SrcRect.iBottom = image_bottom;
+            BltVideoSurface(FRAME_BUFFER, GetCatalogVideoObjectHandle(0xe8, 0), 0, 0x98, top,
+                            VS_BLT_SRCSUBRECT, &fx);
+        }
+    }
+
     switch (state) {
     case 0:
         DrawCatalogImage(FRAME_BUFFER, 0xea, 0, slot, 0x98, top, VO_BLT_SRCTRANSPARENCY, 0);
@@ -162,6 +192,8 @@ unsigned char MainMenuScreenEnter(void)
     ColorFillVideoSurfaceArea(FRAME_BUFFER, 0, 0, 0x280, 0x1e0, colour);
     SetViewport(0, 0, 0x280, 0x1e0);
     g_main_menu_selected_item = 0;
+    /* Wide canvas: if Data\Options\intro_bg_text_<W>.sti exists, DrawCatalogImage
+       draws it over the whole canvas itself (the common wide_art.h mechanism). */
     DrawCatalogImage(FRAME_BUFFER, 0xe8, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
 
     DrawMainMenuItem(0, 0);
@@ -178,7 +210,12 @@ unsigned char MainMenuScreenEnter(void)
     SetFontObjectPalette16BPP(g_wiz_text_font_secondary,
                               g_font_state_palettes[W8_FONT_PALETTE_WHITE]);
     measured = StringPixLength(wide, g_wiz_text_font_secondary);
-    gprintf(0x27b - measured, 5, wide);
+    {
+        /* Mod (wide canvas): the version in the top-right corner of the whole canvas, not
+           of the 640 window (window origin shifted by 2*ox: game x 640 = right edge). */
+        CanvasOriginScope corner_scope(2 * g_canvas_ox);
+        gprintf(0x27b - measured, 5, wide);
+    }
     SetFontObjectPalette16BPP(g_wiz_text_font_secondary, g_wiz_text_font_secondary_palette);
     ResetRegions();
     RegionSetEnable(1);
@@ -365,6 +402,16 @@ void MainMenuScreenFrame()
 // FUNCTION: WIZ8 0x00591870
 unsigned char MainMenuScreenLeave(int)
 {
+    /* Mod (wide canvas): the wide menu background (wide_art.h) also lies in the side
+       strips. Erase them and re-upload the whole canvas so that the next screen
+       (party creation, loading, options, credits) gets black strips.
+       ResetTransientRenderScenes first resets the "whole page
+       dirty" flags, so InvalidateCanvas(0) inside it is not skipped. */
+    if (g_canvas_ox > 0) {
+        ReleaseWideFullscreenArt(); /* clear the "wide background on the canvas" mark */
+        CanvasClearSideBars();
+        ResetTransientRenderScenes();
+    }
     ReleaseLoadedVideoFrames();
     ResetRegions();
     MSYS_Shutdown();

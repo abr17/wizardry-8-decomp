@@ -1,4 +1,5 @@
 #include "wiz8/local_screens/MainGameScreen.h"
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/local_screens/OptionsScreen.h"
 #include "wiz8/local_code/ControlsRect.h"
 #include "wiz8/local_code/TextBuffer.h"
@@ -72,12 +73,14 @@ Controls::Controls()
     m_fEnabled = false;
     m_fDirty = false;
     m_fLayoutDirty = false;
+    m_layoutAnchor = W8_ANCHOR_CENTER; /* wide canvas layout A */
     m_bounds.left = 0;
     m_bounds.top = 0;
     m_bounds.right = 0;
     m_bounds.bottom = 0;
     m_dirtyRect.left = -1;
     m_fWholeAreaDirty = true;
+    m_wideMode = W8_PANEL_WIDE_NONE; /* layout A: background as in the original */
     m_uiRegionSetId = 0;
 }
 
@@ -90,6 +93,7 @@ Controls::Controls(int left, int top, int right_bound, int bottom_bound, int cat
     m_fEnabled = false;
     m_fDirty = false;
     m_fLayoutDirty = false;
+    m_layoutAnchor = W8_ANCHOR_CENTER; /* wide canvas layout A */
     m_catalogObject = catalog_object;
     m_catalogFrame = catalog_frame;
     m_catalogImage = catalog_image;
@@ -97,6 +101,7 @@ Controls::Controls(int left, int top, int right_bound, int bottom_bound, int cat
     m_bounds.bottom = bottom_bound;
     m_dirtyRect.left = -1;
     m_fWholeAreaDirty = true;
+    m_wideMode = W8_PANEL_WIDE_NONE; /* layout A: background as in the original */
     m_uiRegionSetId = 0;
 }
 
@@ -860,6 +865,7 @@ void W8TextControl::Redraw(bool full_redraw)
     }
 
     int sprite;
+    bool centre_alternate = false;
     if (!m_enabled) {
         sprite = m_disabledSprite;
         if (sprite == -1) {
@@ -873,18 +879,27 @@ void W8TextControl::Redraw(bool full_redraw)
             return;
         }
     } else if ((m_stateFlags & g_W8TextControlStatePressed) == 0) {
-        sprite = m_alternateTextEnabled && m_alternateNormalSprite != -1 ? m_alternateNormalSprite
-                                                                         : m_normalSprite;
+        if (m_alternateTextEnabled && m_alternateNormalSprite != -1) {
+            sprite = m_alternateNormalSprite;
+            centre_alternate = true;
+        } else {
+            sprite = m_normalSprite;
+        }
     } else {
-        sprite = m_alternateTextEnabled && m_alternatePressedSprite != -1 ? m_alternatePressedSprite
-                                                                          : m_pressedSprite;
+        if (m_alternateTextEnabled && m_alternatePressedSprite != -1) {
+            sprite = m_alternatePressedSprite;
+            centre_alternate = true;
+        } else {
+            sprite = m_pressedSprite;
+        }
     }
 
     int x;
     int y;
     GetTextOrigin(&x, &y);
     if (sprite != -1) {
-        if (m_alternateTextEnabled) {
+        /* Retail 0x4f4aa7/0x4f4b40: only the alternate sprites are centred on the rect. */
+        if (centre_alternate) {
             short width;
             short height;
             GetCatalogImageSize(m_imageObject, m_imageFrame, sprite, &width, &height);
@@ -1074,7 +1089,9 @@ void W8TextControl::OnMouseLeave(int event)
         SetAlternateTextEnabled(false);
         Invalidate(static_cast<unsigned char>(event));
     }
-    if ((m_stateFlags & g_W8TextControlStateSecondary) != 0) {
+    /* Retail 0x4f4ee8: keep Pressed only for a toggle that is latched. */
+    if ((m_layoutFlags & g_W8TextControlLayoutToggle) != 0 &&
+        (m_stateFlags & g_W8TextControlStateSecondary) != 0) {
         return;
     }
     m_stateFlags &= ~g_W8TextControlStatePressed;
@@ -1123,6 +1140,10 @@ void W8TextControl::OnLeftButtonDown(int event)
         m_stateFlags |= g_W8TextControlStatePressed;
         if (m_imageObject != -1 && m_imageFrame != -1) {
             Invalidate(static_cast<unsigned char>(event));
+        } else {
+            /* Retail 0x4f5020..0x4f503e: a text-only button always takes the
+               immediate path (panel Invalidate(NULL) + redraw request). */
+            Invalidate(true);
         }
     } else if ((m_stateFlags & g_W8TextControlStatePressed) == 0) {
         m_stateFlags |= g_W8TextControlStatePressed;
@@ -1131,7 +1152,7 @@ void W8TextControl::OnLeftButtonDown(int event)
         }
     }
 
-    m_textBuffer.SetGeometryDirty();
+    /* Retail sets the geometry-dirty byte (+0xa0) only inside Invalidate. */
     if (m_leftButtonDownCallback != 0) {
         m_leftButtonDownCallback();
     }
@@ -1184,13 +1205,18 @@ void W8TextControl::OnLeftButtonUp(int event)
         if ((m_layoutFlags & g_W8TextControlLayoutLatchedImage) != 0) {
             Invalidate(static_cast<unsigned char>(event));
         }
-    } else if ((m_layoutFlags & g_W8TextControlLayoutStayLatched) == 0) {
+    } else {
+        /* Retail 0x4f512e: a latched StayLatched toggle returns at once (no state
+           change, no activation). */
+        if ((m_layoutFlags & g_W8TextControlLayoutStayLatched) != 0) {
+            return;
+        }
         m_stateFlags &= ~g_W8TextControlStatePressed;
         m_stateFlags &= ~g_W8TextControlStateSecondary;
         Invalidate(static_cast<unsigned char>(event));
     }
 
-    m_textBuffer.SetGeometryDirty();
+    /* Retail sets the geometry-dirty byte (+0xa0) only via the inlined Invalidate. */
     if ((m_layoutFlags & W8_TEXT_CONTROL_ACTIVATE_WHILE_HELD) != 0 &&
         (m_stateFlags & W8_TEXT_CONTROL_ACTIVATED_WHILE_HELD) != 0) {
         m_stateFlags &= ~W8_TEXT_CONTROL_ACTIVATED_WHILE_HELD;
@@ -1752,6 +1778,16 @@ void W8HorizontalRangeThumb::ClampPositionAndInvalidate()
     Invalidate(false);
 }
 
+/* Mod, layout A: how many pixels the slider is shifted toward the canvas edge
+   (the anchor of its mouse region). Outside layout A - 0. */
+static int RangeThumbAnchorShift(int region)
+{
+    if (region == -1) {
+        return 0;
+    }
+    return CanvasAnchorShift(GetRegionLayoutAnchor(static_cast<unsigned int>(region)));
+}
+
 // FUNCTION: WIZ8 0x004f5620
 W8HorizontalRangeThumb::W8HorizontalRangeThumb(Controls* panel, unsigned int region, int left,
                                                int top, int catalog_object, int catalog_frame,
@@ -1797,7 +1833,8 @@ void W8HorizontalRangeThumb::OnLeftButtonDown(int event)
     if (m_enabled) {
         POINT cursor;
         SGPMouseGetPos(&cursor);
-        int x = cursor.x - m_pPanel->m_bounds.left - m_left;
+        /* Layout A: cursor in game-canvas coordinates; slider at the canvas edge. */
+        int x = cursor.x - RangeThumbAnchorShift(m_region) - m_pPanel->m_bounds.left - m_left;
         if (!m_hovered) {
             m_hovered = true;
             m_position = ((x - m_thumbWidth / 2) / static_cast<float>(m_trackLength)) *
@@ -1868,7 +1905,7 @@ void W8HorizontalRangeThumb::OnMouseMove(int event)
 
     POINT cursor;
     SGPMouseGetPos(&cursor);
-    int x = cursor.x - m_pPanel->m_bounds.left - m_left;
+    int x = cursor.x - RangeThumbAnchorShift(m_region) - m_pPanel->m_bounds.left - m_left;
     if (m_dragging) {
         if (x < 0 || m_trackLength + m_thumbWidth / 2 < x) {
             return;
@@ -1997,10 +2034,23 @@ void Controls::RedrawControls(bool full_redraw)
 {
     if (full_redraw) {
         if (m_fWholeAreaDirty) {
-            if (m_catalogObject != -1) {
+            /* Layout A: a stretched background / filled gaps are invalidated as a whole
+               (InvalidateSubscreenPanelArt); otherwise - as in the original. */
+            if (m_catalogObject != -1 &&
+                !InvalidateSubscreenPanelArt(m_wideMode, m_catalogObject, m_catalogFrame,
+                                             m_catalogImage, m_bounds.left, m_bounds.top, 2)) {
                 InvalidateCatalogImageRect(m_catalogObject, m_catalogFrame, m_catalogImage,
                                            m_bounds.left, m_bounds.top, 2);
             }
+        } else if (m_wideMode == W8_PANEL_WIDE_STRETCH) {
+            /* Layout A: a partial rectangle of a stretched panel comes
+               from the text window (InvalidateMainGameActionPanelRect), which
+               lives in centered coordinates (edges extended by +-ox).
+               So it is invalidated at the center, not at the left edge. At W = 640
+               or outside the layout the origin is the same - as in the original. */
+            CanvasDrawScope center_scope(W8_ANCHOR_CENTER);
+            InvalidateRegion(m_dirtyRect.left, m_dirtyRect.top, m_dirtyRect.right,
+                             m_dirtyRect.bottom, 2);
         } else {
             InvalidateRegion(m_dirtyRect.left, m_dirtyRect.top, m_dirtyRect.right,
                              m_dirtyRect.bottom, 2);
@@ -2022,16 +2072,31 @@ void Controls::Redraw()
     if (!m_fEnabled) {
         return;
     }
+    /* Wide canvas layout A: the panel art and its dirty rectangle at the
+       panel's canvas edge (children pick their own, see RedrawChildren). */
+    CanvasDrawScope layout_scope(m_layoutAnchor);
     if (m_fDirty) {
-        if (m_catalogObject != -1) {
-            DrawCatalogImage(FRAME_BUFFER, m_catalogObject, m_catalogFrame, m_catalogImage,
-                             m_bounds.left, m_bounds.top, VO_BLT_SRCTRANSPARENCY, 0);
-        }
+        DrawBackground(m_catalogImage); /* layout A: may be stretched */
         redrawn = true;
     } else if (!m_fLayoutDirty) {
         return;
     }
     RedrawControls(redrawn);
+}
+
+/* Panel background. Without stretching (and outside layout A) - exactly the original's call from
+   Controls::Redraw: one image at the panel origin. */
+void Controls::DrawBackground(int image)
+{
+    if (m_catalogObject == -1) {
+        return;
+    }
+    if (DrawSubscreenPanelArt(m_wideMode, m_catalogObject, m_catalogFrame, image, m_bounds.left,
+                              m_bounds.top)) {
+        return;
+    }
+    DrawCatalogImage(FRAME_BUFFER, m_catalogObject, m_catalogFrame, static_cast<short>(image),
+                     m_bounds.left, m_bounds.top, VO_BLT_SRCTRANSPARENCY, 0);
 }
 
 /* Replaces the panel bounds and forwards each child's existing relative

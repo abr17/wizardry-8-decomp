@@ -22,6 +22,8 @@
 #include "wiz8/local_code/Strings.h"
 #include "wiz8/local_code/CombatSound.h"
 #include "wiz8/local_code/GameplayInit.h"
+#include "wiz8/russian_text.h"
+#include "wiz8/canvas.h"
 #include "wiz8/engine_code/Missile.h"
 #include "LibraryDataBase.h"
 #include "wiz8/sound_man.h"
@@ -60,9 +62,14 @@ unsigned char InitializeGame(void)
     LoadPatchSlfArchives("Patches");
     LoadLocalizedStrings(gzStringDataOverride ? gzStringDataOverride
                                               : "Data\\Strings\\StringData.DAT");
-    buffer = LockPrimarySurface(&count);
+    /* Mod: Russian translation (fonts with Cyrillic) - before InitializeMenuFonts. */
+    InitializeRussianText();
+    /* Wide canvas: clear the whole W-wide surface from its start; the
+       window pointer LockPrimarySurface returns would overrun by ox*2 bytes. */
+    buffer = LockPrimarySurfaceFull(&count);
     memset(buffer, 0, count * 0x1e0);
     UnlockPrimarySurface();
+    CanvasNoteSideBarsCleared();
     LoadGameConfiguration();
     g_current_screen_state.id = W8_SCREEN_NONE;
     g_pending_screen_state.id = W8_SCREEN_NONE;

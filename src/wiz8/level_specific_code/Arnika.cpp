@@ -228,7 +228,8 @@ void ArnikaWarningSound(int command)
             return;
         }
         g_warning_gate = 0;
-        if (command <= 0x1e) {
+        /* Retail 0x004E0B96: unsigned compare (ja), so negative commands take the one-shot. */
+        if (static_cast<unsigned int>(command) <= 0x1e) {
             g_warning_gate = new W8IntervalGate(static_cast<float>(command), false, true);
         } else {
             g_warning_oneshot = CreateAndPlaySoundNode(
@@ -243,10 +244,11 @@ void ArnikaWarningSound(int command)
         }
     }
     if (g_warning_oneshot != 0) {
-        if (g_warning_oneshot->IsPlaying()) {
-            return;
+        /* Retail 0x004E0D99: clears the finished one-shot and returns; the gate starts next tick. */
+        if (!g_warning_oneshot->IsPlaying()) {
+            g_warning_oneshot = 0;
         }
-        g_warning_oneshot = 0;
+        return;
     }
     if (g_warning_gate == 0) {
         g_warning_gate = new W8IntervalGate(30.0f, false, true);
@@ -1064,8 +1066,9 @@ int ArnikaPedestalItem(int* previous_item)
             position = info->p3D->movement.position;
             position.y += info->p3D->movement.height_offset;
             g_gd_camera->LookAt(&position, false);
+            /* Retail 0x004E2664: info == 0 jumps past both LookAt and the notice. */
+            QueueNpcScriptNotice(npc, 0, 8, false, 0);
         }
-        QueueNpcScriptNotice(npc, 0, 8, false, 0);
     }
     if (GetLocationVarIDByName("WarnedAboutEntry") == -1) {
         CreateLocationVar("WarnedAboutEntry", 1);

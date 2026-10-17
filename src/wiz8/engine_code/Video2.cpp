@@ -1,4 +1,7 @@
 #include "wiz8/xstatus.h"
+#include "wiz8/canvas.h"
+#include "wiz8/w8diff_port.h"
+#include "wiz8/wide_art.h"
 #ifdef WIZ8_RUNTIME_TESTS
 #include "runtime_instrumentation.h"
 #endif
@@ -189,6 +192,7 @@ srScene* g_scene_overlay1;
 srScene* g_scene_square;
 // GLOBAL: WIZ8 0x659660
 srColorSurface* g_primary_color_surface;
+extern srColorSurface* g_work_color_surface; /* mod: window zone layout, below */
 // GLOBAL: WIZ8 0x659664
 class stSurface2D* g_surface_node;
 // GLOBAL: WIZ8 0x659680
@@ -202,7 +206,9 @@ srColorSurface* g_mouse_surface;
 // GLOBAL: WIZ8 0x65967c
 srMaterial* g_blit_material;
 // GLOBAL: WIZ8 0x654adc
-srNode* g_surface_nodes[0x12c0];
+/* Wide canvas: retail 0x12c0 = 80x60 cells; sized for the widest canvas
+   (107x60), only g_canvas_cells entries are used. */
+srNode* g_surface_nodes[W8_CANVAS_MAX_CELLS];
 // GLOBAL: WIZ8 0x6595dc
 int g_surface_opaque_shader_bits;
 // GLOBAL: WIZ8 0x654ad8
@@ -221,7 +227,8 @@ extern const float g_viewport_x_scale = 1.0f / 640.0f;
 extern const float g_viewport_y_scale = 1.0f / 480.0f;
 
 // GLOBAL: WIZ8 0x652ddc
-unsigned char g_tile_dirty_flags[0x12c0];
+/* Wide canvas: g_canvas_cols x 60 cells (retail 80x60). */
+unsigned char g_tile_dirty_flags[W8_CANVAS_MAX_CELLS];
 // GLOBAL: WIZ8 0x006596e4
 unsigned int g_active_page;
 // GLOBAL: WIZ8 0x006596d4
@@ -279,10 +286,153 @@ int g_cursor_hotspot_y;
 // GLOBAL: WIZ8 0x6596c4
 bool g_system_cursor_visible;
 
+/* Wide canvas: where the cursor image is drawn, in canvas pixels (0..W).
+   g_cursor_width/g_cursor_height above keep the game-space (640x480)
+   position every caller reads; at W = 640 both pairs are equal. */
+static int g_cursor_canvas_x;
+static int g_cursor_canvas_y;
+
+/* Wide canvas Hor+ state (see SetViewport): the world camera plane widened to
+   the canvas edges, the plane the game asked for, and the camera it belongs
+   to (a new world means a new camera with its own plane). */
+static bool g_hor_plus_widened;
+static srCamera* g_hor_plus_camera;
+static srCamera::Rect g_hor_plus_plane;
+static srCamera::Rect g_hor_plus_wide;
+
+/* Layout A (main game HUD at the canvas edges): SetViewport gets the viewport
+   widened by ox on both sides; remember the plane it installed and the plane
+   of the retail (unwidened) rectangle, for the save-thumbnail capture. */
+static bool g_layout_plane_valid;
+static srCamera* g_layout_plane_camera;
+static srCamera::Rect g_layout_wide_plane;
+static srCamera::Rect g_layout_retail_plane;
+
+/* Hor+ in effect for the current world camera: the world (and sky) passes are
+   drawn over the full canvas width instead of the g_viewport rectangle. */
+static bool IsWorldViewWidened(void)
+{
+    if (!g_hor_plus_widened || g_world == 0 || g_world->camera == 0 ||
+        g_world->camera != g_hor_plus_camera) {
+        return false;
+    }
+    if (g_camera_sway_active) {
+        /* The sway effect rebuilds a symmetric plane every frame from the
+           widened field of view: still wide. */
+        return true;
+    }
+    /* Someone else installed a plane since SetViewport (automap, a new world
+       whose camera reuses the freed address...): only a plane as wide as ours
+       is drawn over the full canvas. */
+    srCamera::Rect current;
+    double depth;
+    g_hor_plus_camera->getViewPlane(current, depth);
+    double wide = g_hor_plus_wide.right - g_hor_plus_wide.left;
+    double span = current.right - current.left;
+    return fabs(span - wide) <= 1e-3 * fabs(wide);
+}
+
+/* A 640-space rectangle (left, top, right, bottom) in renderer output pixels:
+   retail scaled x by width/640; the canvas adds the window offset and scales by
+   width/W. `widen` stretches it over the full canvas width (Hor+). The integer
+   arithmetic is retail's (unsigned, width not right edge), so W = 640 gives the
+   same numbers. */
+static void MapRectToOutput(int left, int top, int right, int bottom, w8_ulong width,
+                            w8_ulong height, bool widen, w8_ulong* out)
+{
+    if (widen) {
+        out[0] = 0;
+        out[2] = width;
+    } else {
+        out[0] = static_cast<w8_ulong>(left + g_canvas_ox) * width / g_canvas_w;
+        out[2] = static_cast<w8_ulong>(right - left) * width / g_canvas_w;
+    }
+    out[1] = static_cast<w8_ulong>(top) * height / 480;
+    out[3] = static_cast<w8_ulong>(bottom - top) * height / 480;
+}
+
+/* Paint the canvas side bars (outside the 640 window) black in the back buffer
+   at the start of a frame. The 2D canvas is transparent there in game screens
+   (alpha test on), so without this the bars would show whatever the previous
+   frames left behind. A widened world pass (Hor+) draws over them afterwards. */
+static void ClearCanvasSideBars(const srVector3T<float>& clear_color)
+{
+    if (g_canvas_ox <= 0) {
+        return;
+    }
+    w8_ulong width = g_gerd->getWidth();
+    w8_ulong height = g_gerd->getHeight();
+    if (CanvasWideLayoutActive()) {
+        /* Layout A: the widened 3D view reaches into the bars, so they cannot
+           be cleared blindly; clear the whole back buffer instead. The world
+           and sky passes draw over their (widened) viewport afterwards, and
+           any spot the opaque HUD leaves uncovered (a centered sub-screen in
+           the wide bottom panel) is black rather than an old frame. */
+        g_gerd->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        g_gerd->setViewPort(0, 0, width, height);
+        g_gerd->setScissor(0, 0, width, height);
+        g_gerd->clear(srFlags<srGERD::e_buffer>(srGERD::BUFFER_COLOR | srGERD::BUFFER_DEPTH));
+        g_gerd->setClearColor(clear_color.x, clear_color.y, clear_color.z, 1.0f);
+        return;
+    }
+    w8_ulong left_end = static_cast<w8_ulong>(g_canvas_ox) * width / g_canvas_w;
+    w8_ulong right_start = static_cast<w8_ulong>(g_canvas_ox + 640) * width / g_canvas_w;
+    g_gerd->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    if (left_end > 0) {
+        g_gerd->setViewPort(0, 0, left_end, height);
+        g_gerd->setScissor(0, 0, left_end, height);
+        g_gerd->clear(srFlags<srGERD::e_buffer>(srGERD::BUFFER_COLOR | srGERD::BUFFER_DEPTH));
+    }
+    if (right_start < width) {
+        g_gerd->setViewPort(right_start, 0, width - right_start, height);
+        g_gerd->setScissor(right_start, 0, width - right_start, height);
+        g_gerd->clear(srFlags<srGERD::e_buffer>(srGERD::BUFFER_COLOR | srGERD::BUFFER_DEPTH));
+    }
+    g_gerd->setViewPort(0, 0, width, height);
+    g_gerd->setScissor(0, 0, width, height);
+    g_gerd->setClearColor(clear_color.x, clear_color.y, clear_color.z, 1.0f);
+}
+
+/* Move the OS cursor so that it maps to canvas point (x, y). Fullscreen uses
+   screen coordinates, windowed mode the client area (as retail). With the
+   output -> canvas mouse scale, the OS cursor is left alone when it already
+   lies in that canvas cell: snapping it to the cell would eat small mouse
+   movements (mouselook warps the cursor back every event). */
+static void SetSystemCursorToCanvas(int x, int y)
+{
+    POINT origin;
+    origin.x = 0;
+    origin.y = 0;
+    if (!g_fullscreen) {
+        ClientToScreen(ghWindow, &origin);
+    }
+    if (CanvasMouseScaleEnabled()) {
+        POINT current;
+        if (GetCursorPos(&current)) {
+            int canvas_x;
+            int canvas_y;
+            CanvasScreenToCanvas(current.x - origin.x, current.y - origin.y, &canvas_x,
+                                 &canvas_y);
+            if (canvas_x == x && canvas_y == y) {
+                return;
+            }
+        }
+    }
+    int screen_x;
+    int screen_y;
+    CanvasCanvasToScreen(x, y, &screen_x, &screen_y);
+    SetCursorPos(origin.x + screen_x, origin.y + screen_y);
+}
+
 // FUNCTION: WIZ8 0x00428ab0
 void AssertFailureHandler(const char* expression, const char* file, w8_long line,
                           const char* message)
 {
+    {
+        /* Mod: the stack at the moment of the check goes to Wiz8Runtime.assert.txt (see wiz8_crash_report.cpp). */
+        extern void W8DumpStackToFile(const char* file_name);
+        W8DumpStackToFile("Wiz8Runtime.assert.txt");
+    }
     char text[2048];
     strcpy(text, "ERROR: You are viewing a message intended for the developers of "
                  "Wizardry 8. Please report the following information to technical "
@@ -310,6 +460,25 @@ PTR LockPrimarySurface(UINT32* pitch)
 
     DDLockSurface(g_primary_surface, NULL, &description, 0, NULL);
     *pitch = description.lPitch;
+    /* Wide canvas: every 2D writer (SGP blitters, fonts, Bink, direct-lock
+       screens) gets the centered 640x480 window inside the W-wide surface:
+       the pointer moves ox pixels right, the pitch stays the real one. */
+    if (description.lpSurface == 0) {
+        return 0;
+    }
+    /* Layout A: the window start is the current draw origin (ox, or 0 / 2*ox
+       while a left/right-anchored HUD element draws, see CanvasDrawScope). */
+    return static_cast<unsigned char*>(description.lpSurface) + CanvasDrawOrigin() * 2;
+}
+
+/* Wide canvas: the whole W x 480 surface (not the centered window), for full
+   clears. Unlock with UnlockPrimarySurface. */
+PTR LockPrimarySurfaceFull(UINT32* pitch)
+{
+    DDSURFACEDESC description;
+
+    DDLockSurface(g_primary_surface, NULL, &description, 0, NULL);
+    *pitch = description.lPitch;
     return description.lpSurface;
 }
 
@@ -328,6 +497,7 @@ void ResetVideoFrameState(void)
     DDLockSurface(g_primary_surface, NULL, &description, 0, NULL);
     memset(description.lpSurface, 0, description.lPitch * 480);
     DDUnlockSurface(g_primary_surface, NULL);
+    CanvasNoteSideBarsCleared(); /* mod: stone wings wiped */
     memset(g_tile_dirty_flags, 0, sizeof(g_tile_dirty_flags));
     memset(g_surface_nodes, 0, sizeof(g_surface_nodes));
     active = g_active_page;
@@ -338,7 +508,7 @@ void ResetVideoFrameState(void)
     PurgeInactiveSceneInstances(g_scene_overlay0);
     PurgeInactiveSceneInstances(g_scene_prerender1);
     PurgeInactiveSceneInstances(g_scene_overlay1);
-    InvalidateRegion(0, 0, 640, 480, 0);
+    InvalidateCanvas(0); /* wide canvas: whole W x 480 */
 }
 
 /* Brings the renderer up, shows the window and, when the INSPECTOR switch was
@@ -351,6 +521,16 @@ unsigned char InitializeVideoManager(HINSTANCE instance, unsigned short show_com
 {
     unsigned int active;
     MEMORYSTATUS status;
+    /* /WINDOW on the command line (parsing happens earlier, VideoFullScreen(FALSE)
+       cleared g_fullscreen): a window for this launch, whatever the ini says. */
+    if (!g_fullscreen) {
+        DisplayForceMode(W8_DISPLAY_WINDOW);
+    }
+    /* Wide canvas: pick W (wiz8wide.ini) before the window and the surface exist. */
+    CanvasInitialize();
+    /* Display mode from the settings (wiz8wide.ini [Display] Mode): borderless and
+       full screen - a popup window the size of the monitor, window - with a frame. */
+    g_fullscreen = DisplayModeSetting() == W8_DISPLAY_WINDOW ? 0 : 1;
     memset(&status, 0, sizeof(status));
     status.dwLength = sizeof(status);
     GlobalMemoryStatus(&status);
@@ -399,7 +579,7 @@ unsigned char InitializeVideoManager(HINSTANCE instance, unsigned short show_com
             PurgeInactiveSceneInstances(g_scene_overlay0);
             PurgeInactiveSceneInstances(g_scene_prerender1);
             PurgeInactiveSceneInstances(g_scene_overlay1);
-            InvalidateRegion(0, 0, 0x280, 0x1e0, 0);
+            InvalidateCanvas(0); /* wide canvas: whole W x 480 */
             SetRendererModePair();
         }
     }
@@ -487,6 +667,7 @@ void ShutdownVideoScenes(void)
     ReleaseRendererObject(g_blit_material);
     ReleaseRendererObject(g_mouse_surface);
     ReleaseRendererObject(g_primary_color_surface);
+    ReleaseRendererObject(g_work_color_surface);
 }
 
 /* Derives the 16-bit channel masks and their leading-bit positions from the
@@ -535,6 +716,90 @@ void Initialize16BitPixelFormatMasks(void)
    the horizontal screen metric for both axes is present in the retail body and
    is preserved here; AdjustWindowRect turns the four stored client bounds into
    the outer window rectangle before CreateWindowEx. */
+/* Window from the settings: g_window_rect = the client area of the chosen resolution
+   centered in the work area (without the taskbar). */
+static void SetSettingsWindowClientRect(void)
+{
+    int width;
+    int height;
+    RECT work;
+    DisplayResolutionSetting(&width, &height);
+    DisplayDesktopWorkArea(&work);
+    RECT frame = {0, 0, width, height};
+    AdjustWindowRect(&frame, WS_VISIBLE | (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX), FALSE);
+    const int outer_w = frame.right - frame.left;
+    const int outer_h = frame.bottom - frame.top;
+    int left = work.left + ((work.right - work.left) - outer_w) / 2;
+    int top = work.top + ((work.bottom - work.top) - outer_h) / 2;
+    if (left < work.left) {
+        left = work.left;
+    }
+    if (top < work.top) {
+        top = work.top;
+    }
+    g_window_rect.left = left - frame.left;
+    g_window_rect.top = top - frame.top;
+    g_window_rect.right = g_window_rect.left + width;
+    g_window_rect.bottom = g_window_rect.top + height;
+}
+
+bool VideoFullscreenSizeSupported(int width, int height)
+{
+    if (g_gerd == 0) {
+        return true; /* no device yet - OpenRendererWindow will check */
+    }
+    return g_gerd->getDisplayMode(width, height, 32) != -1;
+}
+
+bool VideoApplyDisplaySettings(void)
+{
+    int old_mode = DisplayModeSetting();
+    int old_w;
+    int old_h;
+    DisplayResolutionSetting(&old_w, &old_h);
+    int mode;
+    int width;
+    int height;
+    DisplayPendingSettings(&mode, &width, &height);
+    if (mode == W8_DISPLAY_BORDERLESS) {
+        DisplayDesktopSize(&width, &height); /* not the monitor mode, if full screen right now */
+    }
+    if (CanvasWidthForOutput(width, height) != g_canvas_w) {
+        return false; /* a different aspect ratio - a different canvas, only with a restart */
+    }
+    /* Full screen toggled by the hotkey knocks g_fullscreen off the mode from the
+       settings: then reopen even with the same settings. */
+    const unsigned char want_fullscreen = mode == W8_DISPLAY_WINDOW ? 0 : 1;
+    if (mode == old_mode && width == old_w && height == old_h && g_fullscreen == want_fullscreen) {
+        return true;
+    }
+    /* Close the output first: from full screen this returns the monitor to the desktop
+       mode, and the work area for the window is then computed from it. */
+    if (ghWindow && g_gerd) {
+        g_flush_pending = false;
+        g_gerd->closeWindow(static_cast<srGERD::e_closeHint>(1));
+    }
+    DisplayActivatePendingSettings();
+    DisplayResolutionSetting(&width, &height);
+    g_screen_width = width;
+    g_screen_height = height;
+    g_screen_depth = 32;
+    g_fullscreen = want_fullscreen;
+    if (!g_fullscreen) {
+        SetSettingsWindowClientRect();
+        AdjustWindowRect(&g_window_rect, WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX,
+                         FALSE);
+    }
+    if (ghWindow && g_gerd) {
+        if (!OpenRendererWindow()) {
+            return true;
+        }
+        SetRendererModePair();
+        ResetTransientRenderScenes();
+    }
+    return true;
+}
+
 // FUNCTION: WIZ8 0x00425ec0
 unsigned char CreateWizardryWindow(void)
 {
@@ -562,9 +827,11 @@ unsigned char CreateWizardryWindow(void)
         extent = 640;
     }
     g_window_rect.top = GetSystemMetrics(SM_CXSCREEN) / 2 - extent / 2;
+    /* Wide canvas: the windowed client area is W x 480 (one canvas pixel per
+       window pixel); left/top above keep retail's 640-based centering. */
     extent = GetSystemMetrics(SM_CXSCREEN);
-    if (extent > 640) {
-        extent = 640;
+    if (extent > g_canvas_w) {
+        extent = g_canvas_w;
     }
     g_window_rect.right = g_window_rect.left + extent;
     extent = GetSystemMetrics(SM_CYSCREEN);
@@ -572,6 +839,10 @@ unsigned char CreateWizardryWindow(void)
         extent = 480;
     }
     g_window_rect.bottom = g_window_rect.top + extent;
+    if (DisplayModeSetting() == W8_DISPLAY_WINDOW) {
+        /* client rectangle: AdjustWindowRect below adds the frame */
+        SetSettingsWindowClientRect();
+    }
 
     if (!g_fullscreen) {
         style = WS_VISIBLE | (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX);
@@ -622,7 +893,7 @@ unsigned char InitializePrimaryDirectDrawSurface(void)
     description.dwSize = sizeof(description);
     description.dwFlags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT;
     description.dwHeight = 480;
-    description.dwWidth = 640;
+    description.dwWidth = g_canvas_w; /* wide canvas: W x 480 (retail 640) */
     description.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
     description.ddpfPixelFormat.dwSize = sizeof(description.ddpfPixelFormat);
     description.ddpfPixelFormat.dwFlags = DDPF_RGB;
@@ -645,7 +916,10 @@ unsigned char InitializePrimaryDirectDrawSurface(void)
 
     DDLockSurface(g_primary_surface, NULL, &description, 0, NULL);
     memset(description.lpSurface, 0, description.lPitch * 480);
+    /* Wide canvas: LineDraw users need the real pitch (retail hard-coded 0x500). */
+    CanvasSetFrameBufferPitch(static_cast<unsigned int>(description.lPitch));
     DDUnlockSurface(g_primary_surface, NULL);
+    CanvasNoteSideBarsCleared();
     return 1;
 }
 
@@ -759,10 +1033,26 @@ unsigned char OpenRendererWindow(void)
             0, GetLastError(), 0x400, reinterpret_cast<LPSTR>(&error_message), 0, 0);
         SetWindowPos(ghWindow, NULL, 0, 0, GetSystemMetrics(SM_CXSCREEN),
                      GetSystemMetrics(SM_CYSCREEN), 0);
-        mode = g_gerd->getDisplayMode(g_screen_width, g_screen_height, g_screen_depth);
-        if (mode == -1) {
-            ShutdownWithErrorBox("Video device does not support video resolution.");
-            return 0;
+        if (DisplayBorderlessEnabled()) {
+            /* Borderless: the same popup window at monitor size, but the output
+               is opened with mode -1 - SurRender's windowed opener, sized to the
+               client rectangle (= the monitor), DDSCL_NORMAL, no SetDisplayMode.
+               The 3DVideo.CFG resolution never switches the monitor. */
+            mode = -1;
+        } else {
+            mode = g_gerd->getDisplayMode(g_screen_width, g_screen_height, g_screen_depth);
+            if (mode == -1) {
+                /* Mod: the mode is not available (ini edited by hand, monitor changed) - do not
+                   quit the game, open borderless for this launch instead. */
+                char text[160];
+                _snprintf(text, sizeof(text),
+                          "[Display] fullscreen %dx%dx%d not supported, using borderless",
+                          g_screen_width, g_screen_height, g_screen_depth);
+                text[sizeof(text) - 1] = '\0';
+                CanvasLogLine(text);
+                DisplayForceMode(W8_DISPLAY_BORDERLESS);
+                mode = -1;
+            }
         }
         SetEnvironmentVariableA("FX_GLIDE_NO_SPLASH", "1");
         error = g_gerd->openWindow(mode);
@@ -780,6 +1070,15 @@ IDirectDrawSurface2* BeginVideoPresentation(void)
 {
     DDSURFACEDESC description;
 
+    if (DisplayVideosOnCanvas()) {
+        /* Borderless: no exclusive mode, no 640x480 switch, the renderer stays
+           open. Without a target surface the Bink player writes each frame into
+           the 2D canvas (LockPrimarySurface: the centered 640x480 window) and
+           invalidates its dirty rectangles; IntroScreenFrame then renders the
+           frame like any other screen. W8BinkVideo's constructor clears
+           m_target, so the player never sees a stale pointer. */
+        return 0;
+    }
     if (g_gerd != 0) {
         g_flush_pending = false;
         g_gerd->closeWindow(static_cast<srGERD::e_closeHint>(1));
@@ -811,6 +1110,12 @@ IDirectDrawSurface2* BeginVideoPresentation(void)
 // FUNCTION: WIZ8 0x004234A0
 unsigned char FinishVideoPresentation(void)
 {
+    if (DisplayVideosOnCanvas()) {
+        /* Borderless: nothing was torn down; just make the next screen redraw
+           the whole canvas over the last video frame. */
+        InvalidateCanvas(0);
+        return 1;
+    }
     if (g_video_primary_surface1 != 0) {
         g_video_primary_surface1->Release();
         g_video_primary_surface1 = 0;
@@ -848,6 +1153,14 @@ unsigned char VideoResizeWindow(void)
 // FUNCTION: WIZ8 0x00422970
 void VideoFullScreen(unsigned char enabled)
 {
+    if (DisplayBorderlessEnabled()) {
+        /* Borderless: /WINDOW, the fullscreen toggle and "maximize" (WM_SIZE)
+           keep the popup window; g_fullscreen stays 1 so the mouse code keeps
+           using screen coordinates (window origin = monitor origin). */
+        (void)enabled;
+        g_fullscreen = 1;
+        return;
+    }
     g_fullscreen = enabled;
     if (ghWindow && g_gerd && g_flush_pending) {
         g_flush_pending = false;
@@ -868,7 +1181,7 @@ void ResetTransientRenderScenes(void)
     PurgeInactiveSceneInstances(g_scene_overlay0);
     PurgeInactiveSceneInstances(g_scene_prerender1);
     PurgeInactiveSceneInstances(g_scene_overlay1);
-    InvalidateRegion(0, 0, 640, 480, 0);
+    InvalidateCanvas(0); /* wide canvas: whole W x 480 */
 }
 
 /* Same dirty-block / transient-scene reset as ResetTransientRenderScenes, but
@@ -885,7 +1198,7 @@ void ClearVideoDirtyBlocks(void)
     PurgeInactiveSceneInstances(g_scene_overlay0);
     PurgeInactiveSceneInstances(g_scene_prerender1);
     PurgeInactiveSceneInstances(g_scene_overlay1);
-    InvalidateRegion(0, 0, 640, 480, 1);
+    InvalidateCanvas(1); /* wide canvas: whole W x 480 */
 }
 
 // FUNCTION: WIZ8 0x004277e0
@@ -935,7 +1248,7 @@ unsigned char RestoreVideoManager(void)
             PurgeInactiveSceneInstances(g_scene_overlay0);
             PurgeInactiveSceneInstances(g_scene_prerender1);
             PurgeInactiveSceneInstances(g_scene_overlay1);
-            InvalidateRegion(0, 0, 0x280, 0x1e0, 0);
+            InvalidateCanvas(0); /* wide canvas: whole W x 480 */
             SetRendererModePair();
         }
     }
@@ -973,6 +1286,7 @@ unsigned char ClearPrimarySurface(void)
     DDLockSurface(g_primary_surface, NULL, &description, 0, NULL);
     memset(description.lpSurface, 0, description.lPitch * 480);
     DDUnlockSurface(g_primary_surface, NULL);
+    CanvasNoteSideBarsCleared(); /* mod: stone wings wiped */
     return 1;
 }
 
@@ -1015,10 +1329,15 @@ void RenderScene(srScene* scene, srCamera* camera, const int* viewport, bool pre
         return;
     }
     if (viewport != 0) {
-        w8_ulong left = viewport[0] * width / 640;
-        w8_ulong top = viewport[1] * height / 480;
-        w8_ulong viewport_width = (viewport[2] - viewport[0]) * width / 640;
-        w8_ulong viewport_height = (viewport[3] - viewport[1]) * height / 480;
+        /* Wide canvas: (x + ox) * width / W; the world and sky passes
+           (&g_viewport) span the whole canvas width while Hor+ is in effect. */
+        w8_ulong mapped[4];
+        MapRectToOutput(viewport[0], viewport[1], viewport[2], viewport[3], width, height,
+                        viewport == &g_viewport.left && IsWorldViewWidened(), mapped);
+        w8_ulong left = mapped[0];
+        w8_ulong top = mapped[1];
+        w8_ulong viewport_width = mapped[2];
+        w8_ulong viewport_height = mapped[3];
         g_gerd->setViewPort(left, top, viewport_width, viewport_height);
         g_gerd->setScissor(left, top, viewport_width, viewport_height);
 #ifdef WIZ8_RUNTIME_TESTS
@@ -1137,6 +1456,7 @@ void RenderFrame(void)
     RuntimeObserve(RUNTIME_FRAME_BEGIN, g_fps_frame_count, g_current_screen_state.id,
                    g_video_active);
 #endif
+    ClearCanvasSideBars(clear_color); /* wide canvas: black bars outside the 640 window */
     UpdateRenderElapsedTime();
 
     if (!g_monster_shadow_updates_enabled) {
@@ -1147,9 +1467,12 @@ void RenderFrame(void)
     clear_viewport: {
         w8_ulong height = g_gerd->getHeight();
         w8_ulong width = g_gerd->getWidth();
-        g_gerd->setScissor(g_viewport.left * width / 640, g_viewport.top * height / 480,
-                           (g_viewport.right - g_viewport.left) * width / 640,
-                           (g_viewport.bottom - g_viewport.top) * height / 480);
+        /* Wide canvas: the world area as RenderScene draws it (full canvas
+           width under Hor+), so the widened rows get the fog clear too. */
+        w8_ulong mapped[4];
+        MapRectToOutput(g_viewport.left, g_viewport.top, g_viewport.right, g_viewport.bottom,
+                        width, height, IsWorldViewWidened(), mapped);
+        g_gerd->setScissor(mapped[0], mapped[1], mapped[2], mapped[3]);
         g_gerd->clear(srFlags<srGERD::e_buffer>(srGERD::BUFFER_COLOR | srGERD::BUFFER_DEPTH));
         g_gerd->setScissor(0, 0, width, height);
     }
@@ -1182,6 +1505,15 @@ void RenderFrame(void)
             srGERD::Pick pick;
             pick.position.x = (g_cursor_hotspot_x - half_width - g_viewport.left + g_cursor_width) /
                               static_cast<float>(half_width);
+            if (IsWorldViewWidened()) {
+                /* Wide canvas Hor+: -1..1 now spans the whole canvas, which is
+                   640-space -ox .. 640+ox (same math as our DLL's PickThunk). */
+                double left_edge = -g_canvas_ox;
+                double right_edge = 640 + g_canvas_ox;
+                double cursor_x = g_cursor_hotspot_x + g_cursor_width;
+                pick.position.x = static_cast<float>(
+                    2.0 * (cursor_x - left_edge) / (right_edge - left_edge) - 1.0);
+            }
             pick.position.y = -static_cast<float>(g_cursor_hotspot_y - half_height -
                                                   g_viewport.top + g_cursor_height) /
                               half_height;
@@ -1224,6 +1556,10 @@ void RenderFrame(void)
     RuntimeObserve(RUNTIME_FRAME_SUBMITTED, g_fps_frame_count, g_current_screen_state.id, 0);
 #endif
 
+    W8DiffPortPoll(); /* mod: comparison rig against the original, see w8diff_port.h */
+    if (CanvasTakeScreenshotRequest()) { /* mod: automated tests, see canvas.h */
+        g_screenshot_pending = true;
+    }
     if (g_screenshot_pending) {
         SaveJpegScreenshot();
         g_screenshot_pending = false;
@@ -1255,6 +1591,8 @@ void RenderFrame(void)
     }
     g_seconds_per_frame = 1.0f / frames_per_second;
     g_frames_per_second = frames_per_second;
+    CanvasCountFrame();     /* mod: [Debug] LogFps=1 */
+    CanvasLimitFrameRate(); /* mod: [Display] MaxFps, see canvas.h */
 
     if (g_trigger_action_active && GetWorld() != 0) {
         SetWorldScenePosition(GetWorld(), &saved_world_position);
@@ -1266,9 +1604,11 @@ void RenderFrame(void)
    board) takes over when present; `rect` selects a logical 640x480 viewport,
    otherwise the stored game viewport globals apply. SaveGame uses it for the
    SHOT screenshot; the automap uses it for its backdrop. */
-// FUNCTION: WIZ8 0x00426f80
-unsigned char RenderWorldToSurface(srColorSurface* target, W8ScreenRect* rect,
-                                   bool render_secondary)
+/* space_w/space_ox: what the whole output stands for - retail's 640 (0), or
+   the wide canvas W (ox) for the wide automap, whose rect is game space
+   reaching -ox .. 640+ox and whose target is a W x 480 canvas-space surface. */
+static unsigned char RenderWorldToSurfaceMapped(srColorSurface* target, W8ScreenRect* rect,
+                                                bool render_secondary, int space_w, int space_ox)
 {
     srGERD* gerd = g_secondary_gerd;
     EnvironmentColour clear_color;
@@ -1279,8 +1619,9 @@ unsigned char RenderWorldToSurface(srColorSurface* target, W8ScreenRect* rect,
     gerd->setTextureReduction(g_resident_texture_policy);
     gerd->setScissor(0, 0, gerd->getWidth(), gerd->getHeight());
     if (rect != 0) {
-        gerd->setViewPort(rect->left * gerd->getWidth() / 640, rect->top * gerd->getHeight() / 480,
-                          (rect->right - rect->left) * gerd->getWidth() / 640,
+        gerd->setViewPort((rect->left + space_ox) * gerd->getWidth() / space_w,
+                          rect->top * gerd->getHeight() / 480,
+                          (rect->right - rect->left) * gerd->getWidth() / space_w,
                           (rect->bottom - rect->top) * gerd->getHeight() / 480);
     } else {
         gerd->setViewPort(g_viewport.left * gerd->getWidth() / 640,
@@ -1298,10 +1639,53 @@ unsigned char RenderWorldToSurface(srColorSurface* target, W8ScreenRect* rect,
         gerd->setClearDepth(0.0);
     }
     gerd->clear(srFlags<srGERD::e_buffer>(srGERD::BUFFER_COLOR | srGERD::BUFFER_DEPTH));
+    /* Wide canvas: this capture keeps retail's 640-based mapping (the whole
+       output, then the whole buffer is copied: save thumbnails stay the same
+       80x60 picture). A Hor+ widened plane would squash it, so the cameras
+       still holding our widened plane get the game's plane for the capture.
+       The automap installs its own plane first and is left untouched. */
+    srCamera* narrowed[2] = {0, 0};
+    srCamera::Rect saved_plane[2];
+    double saved_depth[2];
+    /* Layout A (main game HUD at the canvas edges): the plane belongs to the
+       viewport widened by ox on both sides; the capture gets the plane of the
+       retail rectangle instead, so thumbnails look as before. */
+    const srCamera::Rect* wide_plane = &g_hor_plus_wide;
+    const srCamera::Rect* narrow_plane = &g_hor_plus_plane;
+    bool narrow_capture = IsWorldViewWidened();
+    if (!narrow_capture && g_layout_plane_valid && g_world != 0 &&
+        g_world->camera == g_layout_plane_camera) {
+        wide_plane = &g_layout_wide_plane;
+        narrow_plane = &g_layout_retail_plane;
+        narrow_capture = true;
+    }
+    if (narrow_capture) {
+        srCamera* cameras[2];
+        cameras[0] = g_world->camera;
+        cameras[1] = g_secondary_world != 0 ? g_secondary_world->camera : 0;
+        for (int index = 0; index < 2; ++index) {
+            if (cameras[index] == 0) {
+                continue;
+            }
+            cameras[index]->getViewPlane(saved_plane[index], saved_depth[index]);
+            if (saved_plane[index].left == wide_plane->left &&
+                saved_plane[index].right == wide_plane->right &&
+                saved_plane[index].top == wide_plane->top &&
+                saved_plane[index].bottom == wide_plane->bottom) {
+                cameras[index]->setViewPlane(*narrow_plane, saved_depth[index]);
+                narrowed[index] = cameras[index];
+            }
+        }
+    }
     if (render_secondary && g_render_mesh_sky && g_secondary_world != 0) {
         g_secondary_world->static_scene->render(*gerd, g_secondary_world->camera);
     }
     g_world->static_scene->render(*gerd, g_world->camera);
+    for (int index = 0; index < 2; ++index) {
+        if (narrowed[index] != 0) {
+            narrowed[index]->setViewPlane(saved_plane[index], saved_depth[index]);
+        }
+    }
     gerd->endFrame();
     if (g_inverted_depth_render) {
         gerd->setClearDepth(1.0);
@@ -1319,6 +1703,18 @@ unsigned char RenderWorldToSurface(srColorSurface* target, W8ScreenRect* rect,
         return 1;
     }
     return 0;
+}
+
+// FUNCTION: WIZ8 0x00426f80
+unsigned char RenderWorldToSurface(srColorSurface* target, W8ScreenRect* rect,
+                                   bool render_secondary)
+{
+    return RenderWorldToSurfaceMapped(target, rect, render_secondary, 640, 0);
+}
+
+unsigned char RenderWorldToCanvasSurface(srColorSurface* target, W8ScreenRect* rect)
+{
+    return RenderWorldToSurfaceMapped(target, rect, false, g_canvas_w, g_canvas_ox);
 }
 
 // FUNCTION: WIZ8 0x00427440
@@ -1454,7 +1850,8 @@ srModelInstance* MakePolygonBrush(srNode* parent, srColorSurfaceIFace* surface, 
     instance = new stModelInstance2D(parent);
     instance->setName("Video2DMakePolygonBrush");
     instance->SetModel(model);
-    instance->configure2D(static_cast<unsigned short>(width * 640.0),
+    /* Wide canvas: width is a fraction of the canvas width W (retail 640). */
+    instance->configure2D(static_cast<unsigned short>(width * g_canvas_w),
                           static_cast<unsigned short>(height * 480.0));
     return instance;
 }
@@ -1465,7 +1862,7 @@ stModelInstance2D* CreateSpriteFromTexture(srTextureIFace* texture, double width
 {
     srShader shader;
     srVector3T<float> scale;
-    int w = static_cast<int>(width * 640.0);
+    int w = static_cast<int>(width * g_canvas_w); /* wide canvas: fraction of W */
     int h = static_cast<int>(height * 480.0);
 
     srMeshModel* model = SR_NEW(srMeshModel)(0L, 0L);
@@ -1509,8 +1906,11 @@ stModelInstance2D* CreateSpriteFromTexture(srTextureIFace* texture, double width
 }
 
 // FUNCTION: WIZ8 0x00484A40
+/* Port fix (2026-10-12): x, y are signed 32-bit, as in the original
+   (a negative offset of a large automap marker image is clipped instead of
+   turning into 65532). */
 BOOLEAN BlitVideoObjectToColorSurface(UINT32 video_object, UINT16 region,
-                                      srColorSurface* destination, UINT16 x, UINT16 y)
+                                      srColorSurface* destination, INT32 x, INT32 y)
 {
     HVOBJECT object;
     ETRLEObject properties;
@@ -1543,24 +1943,11 @@ BOOLEAN BlitHVObjectToColorSurface(HVOBJECT object, UINT16 region, srColorSurfac
     return TRUE;
 }
 
+/* Wide canvas: (x, y) is a canvas point (the cursor image corner); converted
+   to the OS cursor position by SetSystemCursorToCanvas. */
 static void MoveSystemCursor(int x, int y)
 {
-    RECT client;
-    POINT top_left;
-    POINT bottom_right;
-
-    if (!g_fullscreen) {
-        GetClientRect(ghWindow, &client);
-        top_left.x = client.left;
-        top_left.y = client.top;
-        bottom_right.x = client.right;
-        bottom_right.y = client.bottom;
-        ClientToScreen(ghWindow, &top_left);
-        ClientToScreen(ghWindow, &bottom_right);
-        x += top_left.x;
-        y += top_left.y;
-    }
-    SetCursorPos(x, y);
+    SetSystemCursorToCanvas(x, y);
 }
 
 // FUNCTION: WIZ8 0x00427c90
@@ -1591,10 +1978,12 @@ BOOLEAN ResizeMouseCursorSurface(int width, int height)
     g_cursor_node->release();
     g_cursor_texture->release();
     mapping_scale = g_surface_scale / extent;
-    g_cursor_node = MakePolygonBrush(g_cursor_scene, g_mouse_surface, extent / 640.0,
-                                     extent / 480.0, mapping_scale, mapping_scale, 1.0f, 1.0f, 1);
+    /* Wide canvas: brush width as a fraction of W; position in canvas pixels. */
+    g_cursor_node =
+        MakePolygonBrush(g_cursor_scene, g_mouse_surface, extent / static_cast<double>(g_canvas_w),
+                         extent / 480.0, mapping_scale, mapping_scale, 1.0f, 1.0f, 1);
     g_cursor_node->setName("MouseResize");
-    PositionMouseCursor(g_cursor_width, g_cursor_height, false);
+    PositionMouseCursor(g_cursor_canvas_x, g_cursor_canvas_y, false);
     g_cursor_model = static_cast<srMeshModel*>(g_cursor_node->getModel());
     g_cursor_model->enable(srMeshModel::CONTROL_SORTED_RENDERING);
     g_cursor_model->setSortBias(-100000.0f);
@@ -1615,8 +2004,9 @@ void SetMouseCursorHotspot(short hotspot_x, short hotspot_y)
     int y;
 
     if (g_cursor_hotspot_x != hotspot_x || g_cursor_hotspot_y != hotspot_y) {
-        x = g_cursor_width - hotspot_x + g_cursor_hotspot_x;
-        y = g_cursor_height - hotspot_y + g_cursor_hotspot_y;
+        /* Wide canvas: keep the click point fixed in canvas pixels. */
+        x = g_cursor_canvas_x - hotspot_x + g_cursor_hotspot_x;
+        y = g_cursor_canvas_y - hotspot_y + g_cursor_hotspot_y;
         MoveSystemCursor(x, y);
         SyncSystemCursor();
         g_cursor_hotspot_x = hotspot_x;
@@ -1642,8 +2032,9 @@ BOOLEAN SetMouseCursorFromVideoObject(UINT32 video_object, UINT16 region, INT16 
         return FALSE;
     }
     if (g_cursor_hotspot_x != offset_x || g_cursor_hotspot_y != offset_y) {
-        x = g_cursor_width - offset_x + g_cursor_hotspot_x;
-        y = g_cursor_height - offset_y + g_cursor_hotspot_y;
+        /* Wide canvas: keep the click point fixed in canvas pixels. */
+        x = g_cursor_canvas_x - offset_x + g_cursor_hotspot_x;
+        y = g_cursor_canvas_y - offset_y + g_cursor_hotspot_y;
         MoveSystemCursor(x, y);
         SyncSystemCursor();
         g_cursor_hotspot_x = offset_x;
@@ -1651,7 +2042,7 @@ BOOLEAN SetMouseCursorFromVideoObject(UINT32 video_object, UINT16 region, INT16 
     }
     g_cursor_image_width = properties.usWidth;
     g_cursor_image_height = properties.usHeight;
-    g_cursor_image_u_extent = g_cursor_image_width * g_inverse_screen_width;
+    g_cursor_image_u_extent = g_cursor_image_width * CanvasInverseWidth(); /* wide canvas: 1/W */
     g_cursor_image_v_extent = g_cursor_image_height * g_inverse_screen_height;
     ClearMouseSurface();
     return BlitVideoObjectToColorSurface(video_object, region, g_mouse_surface, 0, 0);
@@ -1705,17 +2096,9 @@ bool IsCursorInsideViewport(void)
 // FUNCTION: WIZ8 0x004280c0
 void WarpSystemCursor(int x, int y)
 {
-    if (g_fullscreen) {
-        SetCursorPos(x, y);
-        return;
-    }
-    RECT client;
-    GetClientRect(ghWindow, &client);
-    // reinterpret-ok: Win32 ClientToScreen takes LPPOINT; RECT is two adjacent POINTs
-    ClientToScreen(ghWindow, reinterpret_cast<LPPOINT>(&client));
-    // reinterpret-ok: Win32 ClientToScreen takes LPPOINT; RECT is two adjacent POINTs
-    ClientToScreen(ghWindow, reinterpret_cast<LPPOINT>(&client.right));
-    SetCursorPos(client.left + x, client.top + y);
+    /* Wide canvas: (x, y) is a game-space point; it lies ox pixels to the
+       right on the canvas, and the canvas is scaled to the window. */
+    SetSystemCursorToCanvas(CanvasZoneMapX(x, y), y); /* mod: window zone layout */
 }
 
 // FUNCTION: WIZ8 0x00428140
@@ -1724,11 +2107,19 @@ void PositionMouseCursor(int width, int height, bool reset_tick)
     srVector3T<double> location;
 
     if (g_mouse_surface) {
-        g_cursor_width = width < 641 ? width : 640;
-        g_cursor_height = height < 481 ? height : 480;
+        /* Wide canvas: (width, height) is the cursor corner in canvas pixels.
+           The image is drawn there; game logic gets the 640x480 position
+           (canvas - ox, clamped to 0..639 / 0..479 like the mouse hook, so
+           polled hover and click events agree). With no mouse mapping active
+           (W = 640, MouseScale=0) CanvasToGame does not clamp: retail. */
+        g_cursor_canvas_x = width < g_canvas_w + 1 ? width : g_canvas_w;
+        g_cursor_canvas_y = height < 481 ? height : 480;
+        CanvasToGame(g_cursor_canvas_x, g_cursor_canvas_y, 640, 480, &g_cursor_width,
+                     &g_cursor_height);
         if (g_cursor_node) {
-            location.x = g_cursor_width / 640.0 + g_mouse_surface->getWidth() / 1280.0;
-            location.y = 1.0 - g_cursor_height / 480.0 - g_mouse_surface->getHeight() / 960.0;
+            location.x = g_cursor_canvas_x / static_cast<double>(g_canvas_w) +
+                         g_mouse_surface->getWidth() / (2.0 * g_canvas_w);
+            location.y = 1.0 - g_cursor_canvas_y / 480.0 - g_mouse_surface->getHeight() / 960.0;
             location.z = 0.0;
             g_cursor_node->setLocation(location);
             if (reset_tick) {
@@ -1803,7 +2194,16 @@ void SyncSystemCursor(void)
         }
         cursor.x -= top_left.x;
         cursor.y -= top_left.y;
-        if (cursor.x != g_cursor_width || cursor.y != g_cursor_height) {
+        /* Wide canvas: client pixels -> canvas pixels (the canvas fills the
+           client area); the cursor state is kept in canvas pixels. */
+        {
+            int canvas_x;
+            int canvas_y;
+            CanvasScreenToCanvas(cursor.x, cursor.y, &canvas_x, &canvas_y);
+            cursor.x = canvas_x;
+            cursor.y = canvas_y;
+        }
+        if (cursor.x != g_cursor_canvas_x || cursor.y != g_cursor_canvas_y) {
             PositionMouseCursor(cursor.x, cursor.y, true);
         }
         if (g_system_cursor_visible) {
@@ -1813,17 +2213,34 @@ void SyncSystemCursor(void)
         return;
     }
 
+    /* Wide canvas: screen pixels -> canvas pixels first (render output is
+       e.g. 2560x1600, the canvas W x 480), then retail's clamp on the canvas. */
+    {
+        int canvas_x;
+        int canvas_y;
+        CanvasScreenToCanvas(cursor.x, cursor.y, &canvas_x, &canvas_y);
+        cursor.x = canvas_x;
+        cursor.y = canvas_y;
+    }
+    POINT unclamped = cursor;
     if (cursor.x < 1)
         cursor.x = 0;
-    else if (cursor.x >= 640)
-        cursor.x = 640;
+    else if (cursor.x >= g_canvas_w)
+        cursor.x = g_canvas_w;
     if (cursor.y < 1)
         cursor.y = 0;
     else if (cursor.y >= 480)
         cursor.y = 480;
-    if (cursor.x != g_cursor_width || cursor.y != g_cursor_height) {
+    if (cursor.x != g_cursor_canvas_x || cursor.y != g_cursor_canvas_y) {
         PositionMouseCursor(cursor.x, cursor.y, true);
-        if (!g_fullscreen) {
+        /* Retail pins the OS cursor to the clamped point on every change. With
+           the mouse scale that would snap it to canvas cells and make it
+           jitter, so it is only pulled back when the clamp really moved it. */
+        if (CanvasMouseScaleEnabled()) {
+            if (cursor.x != unclamped.x || cursor.y != unclamped.y) {
+                SetSystemCursorToCanvas(cursor.x, cursor.y);
+            }
+        } else if (!g_fullscreen) {
             GetClientRect(ghWindow, &client);
             top_left.x = client.left;
             top_left.y = client.top;
@@ -1865,7 +2282,9 @@ bool IsCursorInRectangle(int left, int top, int right, int bottom)
 // FUNCTION: WIZ8 0x00428580
 int GetAtomCursorX(const InputAtom* atom)
 {
-    return static_cast<unsigned short>(atom->uiParam) + g_cursor_hotspot_x;
+    /* Wide canvas layout A: x may be negative (left canvas edge), carried as a
+       16-bit two's complement value; read it signed. 0..639 reads the same. */
+    return static_cast<short>(static_cast<unsigned short>(atom->uiParam)) + g_cursor_hotspot_x;
 }
 
 // FUNCTION: WIZ8 0x004285a0
@@ -1890,9 +2309,11 @@ unsigned char InitializeMouseCursorScene(void)
     if (g_cursor_texture) {
         g_cursor_texture->release();
     }
-    g_cursor_node =
-        MakePolygonBrush(g_cursor_scene, g_mouse_surface, 0.2, 0.26666666666666666,
-                         g_surface_scale / 128.0f, g_surface_scale / 128.0f, 1.0f, 1.0f, 1);
+    /* Wide canvas: the 128x128 brush is 128/W wide (retail 0.2 = 128/640). */
+    g_cursor_node = MakePolygonBrush(g_cursor_scene, g_mouse_surface,
+                                     g_canvas_w == 640 ? 0.2 : 128.0 / g_canvas_w,
+                                     0.26666666666666666, g_surface_scale / 128.0f,
+                                     g_surface_scale / 128.0f, 1.0f, 1.0f, 1);
     if (g_cursor_node) {
         g_cursor_node->setName("MouseInit");
         g_cursor_model = static_cast<srMeshModel*>(g_cursor_node->getModel());
@@ -1902,7 +2323,7 @@ unsigned char InitializeMouseCursorScene(void)
         g_cursor_texture->setWrapS(srTextureIFace::WRAP_CLAMP);
         g_cursor_texture->setWrapT(srTextureIFace::WRAP_CLAMP);
         g_cursor_texture->addReference();
-        PositionMouseCursor(640, 480, true);
+        PositionMouseCursor(640 + g_canvas_ox, 480, true); /* game (640, 480) on the canvas */
     }
     return 1;
 }
@@ -1936,7 +2357,7 @@ void ReleaseSurfaceNode(srNode* node)
     if (node == 0) {
         return;
     }
-    for (int index = 0; index < 0x12c0; ++index) {
+    for (int index = 0; index < g_canvas_cells; ++index) { /* wide canvas: W/8 x 60 */
         if (g_surface_nodes[index] == node) {
             g_surface_nodes[index] = 0;
             g_tile_dirty_flags[index] = 0;
@@ -1964,7 +2385,7 @@ static void InvalidateDirtyTile(int cell, unsigned int flags)
         int columns = node->GetScaledWidth() >> 3;
         int rows = node->GetScaledHeight() >> 3;
 
-        for (int index = 0; index != 0x12c0; ++index) {
+        for (int index = 0; index != g_canvas_cells; ++index) { /* wide canvas */
             if (g_surface_nodes[index] == node) {
                 g_surface_nodes[index] = 0;
                 g_tile_dirty_flags[index] = 0;
@@ -1978,23 +2399,25 @@ static void InvalidateDirtyTile(int cell, unsigned int flags)
             }
         }
         node->release();
-        int start = (position_y >> 3) * 0x50 + (position_x >> 3);
+        /* Wide canvas: position is game space; the grid is canvas space. */
+        int start = (position_y >> 3) * g_canvas_cols + ((position_x + g_canvas_ox) >> 3);
         for (int row = rows; row != 0; --row) {
             int row_cell = start;
             for (int column = columns; column != 0; --column) {
                 InvalidateDirtyTile(row_cell, 0);
                 ++row_cell;
             }
-            start += 0x50;
+            start += g_canvas_cols;
         }
     }
     unsigned char state = g_tile_dirty_flags[cell] | static_cast<unsigned char>(flags) | 0x40;
     g_tile_dirty_flags[cell] = state;
     ++g_dirty_tile_count;
-    int bottom = (cell / 0x50) * 8 + 8;
-    int top = (cell / 0x50) * 8;
-    int right = (cell % 0x50) * 8 + 8;
-    int left = (cell % 0x50) * 8;
+    /* Wide canvas: cell bounds back in game space to compare with g_viewport. */
+    int bottom = (cell / g_canvas_cols) * 8 + 8;
+    int top = (cell / g_canvas_cols) * 8;
+    int right = (cell % g_canvas_cols) * 8 + 8 - g_canvas_ox;
+    int left = (cell % g_canvas_cols) * 8 - g_canvas_ox;
     if (g_world_render_enabled &&
         ((g_viewport.left <= left && left <= g_viewport.right) ||
          (g_viewport.left <= right && right <= g_viewport.right)) &&
@@ -2005,8 +2428,10 @@ static void InvalidateDirtyTile(int cell, unsigned int flags)
     }
 }
 
-// FUNCTION: WIZ8 0x00422d50
-void InvalidateRegion(int left, int top, int right, int bottom, unsigned int flags)
+/* Wide canvas: retail InvalidateRegion body working in canvas pixels
+   (0..W x 0..480) with a W/8-cell row. InvalidateRegion clamps the game-space
+   rectangle to the 640 window and shifts it by ox before calling this. */
+static void InvalidateCanvasRegion(int left, int top, int right, int bottom, unsigned int flags)
 {
     unsigned char cell_flags;
     unsigned int clipped_left;
@@ -2015,14 +2440,14 @@ void InvalidateRegion(int left, int top, int right, int bottom, unsigned int fla
 
     cell_flags = 0;
     if (g_page_full_redraw[g_active_page] == 0) {
-        clipped_right = 0x280;
+        clipped_right = g_canvas_w;
         /* The low clamp is a conditional expression because the original is
            branchless there and branches on the high one, and it is written
            <= 0 rather than < 1: the two are the same test and VC6 encodes them
            differently, setle against setl. */
         clipped_left = left <= 0 ? 0 : left;
-        if (static_cast<int>(clipped_left) > 0x27f) {
-            clipped_left = 0x280;
+        if (static_cast<int>(clipped_left) > g_canvas_w - 1) {
+            clipped_left = g_canvas_w;
         }
         top = top <= 0 ? 0 : top;
         if (top > 0x1df) {
@@ -2031,7 +2456,7 @@ void InvalidateRegion(int left, int top, int right, int bottom, unsigned int fla
         /* Rounded up to the next cell boundary, with C's truncating division so
            a negative right edge collapses rather than wrapping. */
         right = ((right + 7) / 8) * 8;
-        if (right <= 0 || right < 0x280) {
+        if (right <= 0 || right < g_canvas_w) {
             clipped_right = right <= 0 ? 0 : right;
         }
         bottom = ((bottom + 7) / 8) * 8;
@@ -2041,7 +2466,14 @@ void InvalidateRegion(int left, int top, int right, int bottom, unsigned int fla
             bottom = 0x1e0;
         }
         if (static_cast<int>(clipped_right - clipped_left) > 0 && bottom - top > 0) {
-            if (clipped_right - clipped_left == 0x280 && bottom - top == 0x1e0) {
+            /* "Whole page dirty" means the whole 640x480 window (the side bars
+               never change). At W = 640 this is retail's 640x480 test. */
+            /* Layout A (main game, HUD at the canvas edges): the side bars
+               change too, so only the whole canvas counts as a full page. */
+            int full_left = CanvasWideLayoutActive() ? 0 : g_canvas_ox;
+            int full_right = CanvasWideLayoutActive() ? g_canvas_w : g_canvas_ox + 0x280;
+            if (static_cast<int>(clipped_left) <= full_left &&
+                static_cast<int>(clipped_right) >= full_right && bottom - top == 0x1e0) {
                 g_page_full_redraw[g_active_page] = 1;
             }
             if (flags & 4) {
@@ -2054,13 +2486,94 @@ void InvalidateRegion(int left, int top, int right, int bottom, unsigned int fla
                 if (static_cast<int>(clipped_left) < static_cast<int>(clipped_right)) {
                     x = clipped_left;
                     do {
-                        InvalidateDirtyTile(static_cast<int>(x) / 8 + (top / 8) * 0x50, cell_flags);
+                        InvalidateDirtyTile(static_cast<int>(x) / 8 + (top / 8) * g_canvas_cols,
+                                            cell_flags);
                         x += 8;
                     } while (static_cast<int>(x) < static_cast<int>(clipped_right));
                 }
             }
         }
     }
+}
+
+// FUNCTION: WIZ8 0x00422d50
+void InvalidateRegion(int left, int top, int right, int bottom, unsigned int flags)
+{
+    /* Wide canvas: (left..right) is game space. Clamp it to the 640 window
+       (retail clamps to the screen) and move it ox pixels right; rounding to
+       8-pixel cells then happens on the canvas, where the window may start
+       mid-cell (ox = 108 at W = 856). */
+    if (g_page_full_redraw[g_active_page] != 0) {
+        return;
+    }
+    /* Layout A: game x may run from -origin to W - origin (the whole canvas);
+       the shift is the current draw origin (ox, or 0 / 2*ox in an anchored
+       HUD element's CanvasDrawScope). Otherwise retail's 0..640 window. */
+    int origin = CanvasDrawOrigin();
+    int low = 0;
+    int high = 0x280;
+    if (CanvasWideLayoutActive()) {
+        low = -origin;
+        high = g_canvas_w - origin;
+    }
+    left = left <= low ? low : (left > high ? high : left);
+    right = right <= low ? low : (right > high ? high : right);
+    InvalidateCanvasRegion(left + origin, top, right + origin, bottom, flags);
+}
+
+/* Wide canvas: every cell of the W x 480 canvas (the full-screen resets). */
+void InvalidateCanvas(unsigned int flags)
+{
+    InvalidateCanvasRegion(0, 0, g_canvas_w, 0x1e0, flags);
+}
+
+/* Wide backgrounds (wide_art.h): mark both canvas side bars (x < ox and
+   x >= ox + 640), even if the page is already "entirely dirty" - outside layout A
+   this flag covers only the 640 window, and the bars would not get marked.
+   The page flag is restored as it was. With ox = 0 does nothing. */
+void InvalidateCanvasSideBars(unsigned int flags)
+{
+    if (g_canvas_ox <= 0) {
+        return;
+    }
+    unsigned char saved = g_page_full_redraw[g_active_page];
+    g_page_full_redraw[g_active_page] = 0;
+    InvalidateCanvasRegion(0, 0, g_canvas_ox, 0x1e0, flags);
+    InvalidateCanvasRegion(g_canvas_ox + 0x280, 0, g_canvas_w, 0x1e0, flags);
+    g_page_full_redraw[g_active_page] = saved;
+}
+
+/* Mod (2D seams, canvas.h DisplaySingleTexture2DEnabled): side length of a square
+   stSurface2D tile. The original is 128: the layer is cut into 128x128 textures, and
+   when stretched to the screen the bilinear filter does not blend pixels of neighboring
+   tiles - a stripe shows every 128 pixels. One texture for the whole
+   layer (nearest power of two: 1024 for W x 480) removes all seams.
+   If the renderer cannot handle that size - 128, as before. */
+int SurfaceTileExtent(int width, int height)
+{
+    static int logged;
+    int extent = 0x80;
+    if (!DisplaySingleTexture2DEnabled() || g_gerd == 0) {
+        return extent;
+    }
+    int need = width > height ? width : height;
+    while (extent < need) {
+        extent <<= 1;
+    }
+    w8_long max_width = g_gerd->getMaxTextureWidth();
+    w8_long max_height = g_gerd->getMaxTextureHeight();
+    bool fits = max_width >= extent && max_height >= extent;
+    if (!logged) {
+        char text[160];
+        _snprintf(text, sizeof(text),
+                  "[Display] SingleTexture2D: %dx%d layer -> %s %dx%d (renderer max %ldx%ld)",
+                  width, height, fits ? "one texture" : "too big, 128 tiles instead of",
+                  extent, extent, static_cast<long>(max_width), static_cast<long>(max_height));
+        text[sizeof(text) - 1] = '\0';
+        CanvasLogLine(text);
+        logged = 1;
+    }
+    return fits ? extent : 0x80;
 }
 
 /* Invalidate each rectangle in a run; a flagged region cancels the rest. */
@@ -2078,6 +2591,224 @@ void InvalidateScreenRects(W8ScreenRect* rects, unsigned int count, int flags)
     }
 }
 
+/* ---- Mod: canvas compositing (window zone layout, canvas.h) ----
+   The game draws into the DirectDraw surface (the work canvas), while the 2D layer texture
+   takes pixels from a separate display buffer. Without a layout the display buffer is a
+   1:1 copy of the work canvas (by dirty cells). With a layout, pieces of the window are
+   copied to their places and the gaps are filled with marble. */
+static unsigned short* s_display_pixels; /* W x 480, source of the 2D texture */
+srColorSurface* g_work_color_surface;     /* the same DD memory the game draws into */
+/* A copy of the work canvas without the modal window: while a dialog is open, the window pieces
+   that the layout shows next to it are taken from here (under the dialog the
+   work canvas already holds the dialog itself). Updated everywhere except the dialog frame. */
+static unsigned short* s_clean_pixels;
+
+/* Update the clean copy with a rectangle of the work canvas (excluding the dialog frame). */
+static void UpdateCleanCopy(const unsigned char* work, unsigned int pitch, int left, int top,
+                            int right, int bottom)
+{
+    int o_left, o_top, o_right, o_bottom;
+    bool overlay = CanvasZoneOverlayRect(&o_left, &o_top, &o_right, &o_bottom);
+    for (int y = top; y < bottom; ++y) {
+        const unsigned short* source = reinterpret_cast<const unsigned short*>( // reinterpret-ok: DD bytes
+            work + static_cast<size_t>(y) * pitch);
+        unsigned short* target = s_clean_pixels + static_cast<size_t>(y) * g_canvas_w;
+        if (!overlay || y < o_top || y >= o_bottom) {
+            memcpy(target + left, source + left, static_cast<size_t>(right - left) * 2);
+            continue;
+        }
+        int a = left < o_left ? (right < o_left ? right : o_left) : left;
+        if (a > left) {
+            memcpy(target + left, source + left, static_cast<size_t>(a - left) * 2);
+        }
+        int b = right > o_right ? (left > o_right ? left : o_right) : right;
+        if (right > b) {
+            memcpy(target + b, source + b, static_cast<size_t>(right - b) * 2);
+        }
+    }
+}
+
+static void UploadDisplayRect(int left, int top, int right, int bottom)
+{
+    left = left < 0 ? 0 : left;
+    top = top < 0 ? 0 : top;
+    right = right > g_canvas_w ? g_canvas_w : right;
+    bottom = bottom > 0x1e0 ? 0x1e0 : bottom;
+    if (left >= right || top >= bottom || g_surface_node == 0) {
+        return;
+    }
+    g_surface_node->updateRectangle(g_gerd, s_display_pixels, g_canvas_w * 2, left, top, right,
+                                    bottom);
+}
+
+/* Rows [top, bottom) of the work canvas, x = source .. source+width, into the display
+   buffer at x = target. */
+static void CopyWorkToDisplay(const unsigned char* work, unsigned int pitch, int source, int target,
+                              int width, int top, int bottom)
+{
+    if (target < 0) {
+        source -= target;
+        width += target;
+        target = 0;
+    }
+    if (target + width > g_canvas_w) {
+        width = g_canvas_w - target;
+    }
+    if (source < 0 || source + width > g_canvas_w || width <= 0) {
+        return;
+    }
+    for (int y = top; y < bottom; ++y) {
+        memcpy(s_display_pixels + static_cast<size_t>(y) * g_canvas_w + target,
+               work + static_cast<size_t>(y) * pitch + static_cast<size_t>(source) * 2,
+               static_cast<size_t>(width) * 2);
+    }
+}
+
+/* Like CopyWorkToDisplay, but for layout pieces: whatever in the work canvas
+   lies under an open dialog is taken from the clean copy (without the dialog). */
+static void CopyZoneToDisplay(const unsigned char* work, unsigned int pitch, int source, int target,
+                              int width, int top, int bottom)
+{
+    int o_left, o_top, o_right, o_bottom;
+    if (s_clean_pixels == 0 || !CanvasZoneOverlayRect(&o_left, &o_top, &o_right, &o_bottom)) {
+        CopyWorkToDisplay(work, pitch, source, target, width, top, bottom);
+        return;
+    }
+    if (target < 0) {
+        source -= target;
+        width += target;
+        target = 0;
+    }
+    if (target + width > g_canvas_w) {
+        width = g_canvas_w - target;
+    }
+    if (source < 0 || source + width > g_canvas_w || width <= 0) {
+        return;
+    }
+    for (int y = top; y < bottom; ++y) {
+        unsigned short* row = s_display_pixels + static_cast<size_t>(y) * g_canvas_w + target;
+        const unsigned short* live = reinterpret_cast<const unsigned short*>( // reinterpret-ok: DD bytes
+            work + static_cast<size_t>(y) * pitch);
+        const unsigned short* clean = s_clean_pixels + static_cast<size_t>(y) * g_canvas_w;
+        bool covered_row = y >= o_top && y < o_bottom;
+        for (int x = 0; x < width; ++x) {
+            int sx = source + x;
+            row[x] = covered_row && sx >= o_left && sx < o_right ? clean[sx] : live[sx];
+        }
+    }
+}
+
+/* A modal window on top of the layout: its area in the display buffer is always
+   the work canvas 1:1. Call after any write into [left, right) x [top, bottom). */
+static void ApplyZoneOverlay(const unsigned char* work, unsigned int pitch, int left, int top,
+                             int right, int bottom)
+{
+    int o_left, o_top, o_right, o_bottom;
+    if (!CanvasZoneOverlayRect(&o_left, &o_top, &o_right, &o_bottom)) {
+        return;
+    }
+    left = left > o_left ? left : o_left;
+    top = top > o_top ? top : o_top;
+    right = right < o_right ? right : o_right;
+    bottom = bottom < o_bottom ? bottom : o_bottom;
+    if (left >= right || top >= bottom) {
+        return;
+    }
+    CopyWorkToDisplay(work, pitch, left, left, right - left, top, bottom);
+    UploadDisplayRect(left, top, right, bottom);
+}
+
+/* Dirty rectangle of the work canvas -> display buffer (+ upload to the texture). */
+static void ComposeCanvasRect(const unsigned char* work, unsigned int pitch, int left, int top,
+                              int right, int bottom)
+{
+    int zone_count = CanvasZoneCount();
+    if (zone_count == 0) {
+        CopyWorkToDisplay(work, pitch, left, left, right - left, top, bottom);
+        UploadDisplayRect(left, top, right, bottom);
+        return;
+    }
+    left = left < 0 ? 0 : left;
+    right = right > g_canvas_w ? g_canvas_w : right;
+    top = top < 0 ? 0 : top;
+    bottom = bottom > 0x1e0 ? 0x1e0 : bottom;
+    if (s_clean_pixels != 0 && left < right && top < bottom) {
+        UpdateCleanCopy(work, pitch, left, top, right, bottom);
+    }
+    for (int index = 0; index < zone_count; ++index) {
+        const W8CanvasZone* zone = CanvasZoneAt(index);
+        int source_left = zone->left + g_canvas_ox; /* the zone in the work canvas */
+        int source_right = zone->right + g_canvas_ox;
+        int x0 = left > source_left ? left : source_left;
+        int x1 = right < source_right ? right : source_right;
+        int y0 = top > zone->top ? top : zone->top;
+        int y1 = bottom < zone->bottom ? bottom : zone->bottom;
+        if (x0 >= x1 || y0 >= y1) {
+            continue;
+        }
+        if (zone->fill_right == 0) {
+            int target = x0 - source_left + zone->dst_left;
+            CopyZoneToDisplay(work, pitch, x0, target, x1 - x0, y0, y1);
+            UploadDisplayRect(target, y0, target + (x1 - x0), y1);
+            ApplyZoneOverlay(work, pitch, target, y0, target + (x1 - x0), y1);
+            continue;
+        }
+        /* Stretching: the changed part of the strip goes into all its repeats. */
+        int slice = source_right - source_left;
+        for (int start = zone->dst_left; start < zone->fill_right; start += slice) {
+            int target = start + (x0 - source_left);
+            int width = x1 - x0;
+            if (target + width > zone->fill_right) {
+                width = zone->fill_right - target;
+            }
+            if (width <= 0) {
+                continue;
+            }
+            CopyZoneToDisplay(work, pitch, x0, target, width, y0, y1);
+            UploadDisplayRect(target, y0, target + width, y1);
+            ApplyZoneOverlay(work, pitch, target, y0, target + width, y1);
+        }
+    }
+    ApplyZoneOverlay(work, pitch, left, top, right, bottom);
+}
+
+/* Marble gaps of the layout: from the stone wings image
+   (Data\Wide\WideFrame_<W>.sti, wide_art.h). The left half of a gap is the
+   left edge of the right wing (bevel next to the panel on the left), the right half is the right
+   edge of the left wing (bevel next to the panel on the right). No image - dark gray. */
+static void FillZoneGaps(const unsigned char* work, unsigned int pitch)
+{
+    const unsigned short* marble = FindWideFullscreenArt("Data\\Wide\\WideFrame.sti");
+    int fill_count = CanvasZoneFillCount();
+    for (int index = 0; index < fill_count; ++index) {
+        const W8CanvasFill* fill = CanvasZoneFillAt(index);
+        int left = fill->left < 0 ? 0 : fill->left;
+        int right = fill->right > g_canvas_w ? g_canvas_w : fill->right;
+        int top = fill->top < 0 ? 0 : fill->top;
+        int bottom = fill->bottom > 0x1e0 ? 0x1e0 : fill->bottom;
+        int width = fill->right - fill->left;
+        for (int y = top; y < bottom; ++y) {
+            unsigned short* row = s_display_pixels + static_cast<size_t>(y) * g_canvas_w;
+            for (int x = left; x < right; ++x) {
+                unsigned short pixel = 0x8421; /* dark gray, alpha bit */
+                if (marble != 0 && width <= 2 * g_canvas_ox) {
+                    int column = x - fill->left;
+                    int art_x;
+                    if (column < width / 2) {
+                        art_x = g_canvas_ox + 0x280 + column; /* right wing */
+                    } else {
+                        art_x = g_canvas_ox - (width - column); /* left wing */
+                    }
+                    pixel = marble[static_cast<size_t>(y) * g_canvas_w + art_x];
+                }
+                row[x] = pixel;
+            }
+        }
+        UploadDisplayRect(left, top, right, bottom);
+        ApplyZoneOverlay(work, pitch, left, top, right, bottom);
+    }
+}
+
 /* Coalesces dirty 8x8 cells into rectangular texture updates. Retail keeps the
    software surface locked for the complete batch and clears only the uploaded
    bit, preserving the lower per-cell state for the page lifecycle. */
@@ -2086,34 +2817,60 @@ void FlushDirtyTiles(void)
 {
     DDSURFACEDESC description;
 
+    /* Mod: window zone layout - recomposite the whole canvas and fill the gaps. */
+    bool recomposite_all = false;
+    bool refill = false;
+    CanvasZoneBeginFlush(&recomposite_all, &refill);
+    if (s_display_pixels != 0 && (recomposite_all || refill)) {
+        DDLockSurface(g_primary_surface, 0, &description, 0, 0);
+        const unsigned char* work = static_cast<const unsigned char*>(description.lpSurface);
+        unsigned int pitch = static_cast<unsigned int>(description.lPitch);
+        if (recomposite_all) {
+            ComposeCanvasRect(work, pitch, 0, 0, g_canvas_w, 0x1e0);
+        }
+        if (refill || recomposite_all) {
+            FillZoneGaps(work, pitch);
+        }
+        DDUnlockSurface(g_primary_surface, 0);
+    }
     if (g_dirty_tile_count == 0) {
         return;
     }
     DDLockSurface(g_primary_surface, 0, &description, 0, 0);
+    /* Wide canvas: W/8 cells per row (retail 80); coordinates are canvas pixels. */
+    const int columns = g_canvas_cols;
     for (int row = 0; row != 60; ++row) {
         int column = 0;
-        while (column < 80) {
-            int cell = row * 80 + column;
+        while (column < columns) {
+            int cell = row * columns + column;
             if ((g_tile_dirty_flags[cell] & 0x40) == 0) {
                 ++column;
                 continue;
             }
 
             int width = 0;
-            while (column + width < 80 && (g_tile_dirty_flags[cell + width] & 0x40) != 0) {
+            while (column + width < columns && (g_tile_dirty_flags[cell + width] & 0x40) != 0) {
                 ++width;
             }
             int height = 0;
-            while (row + height < 60 && (g_tile_dirty_flags[cell + height * 80] & 0x40) != 0) {
+            while (row + height < 60 &&
+                   (g_tile_dirty_flags[cell + height * columns] & 0x40) != 0) {
                 ++height;
             }
 
-            g_surface_node->updateRectangle(g_gerd, description.lpSurface, description.lPitch,
-                                            column * 8, row * 8, (column + width) * 8,
-                                            (row + height) * 8);
+            if (s_display_pixels != 0) {
+                /* Mod: via the display buffer (1:1 or by the window layout). */
+                ComposeCanvasRect(static_cast<const unsigned char*>(description.lpSurface),
+                                  static_cast<unsigned int>(description.lPitch), column * 8,
+                                  row * 8, (column + width) * 8, (row + height) * 8);
+            } else {
+                g_surface_node->updateRectangle(g_gerd, description.lpSurface, description.lPitch,
+                                                column * 8, row * 8, (column + width) * 8,
+                                                (row + height) * 8);
+            }
             for (int y = 0; y != height; ++y) {
                 for (int x = 0; x != width; ++x) {
-                    g_tile_dirty_flags[cell + y * 80 + x] &= 0x3f;
+                    g_tile_dirty_flags[cell + y * columns + x] &= 0x3f;
                 }
             }
             column += width;
@@ -2133,9 +2890,13 @@ void SetAutomapScaledViewport(int left, int top, int right, int bottom)
         bottom == g_viewport.bottom) {
         return;
     }
-    g_gerd->setViewPort(g_gerd->getWidth() * left / 640, g_gerd->getHeight() * top / 480,
-                        g_gerd->getWidth() * (right - left) / 640,
-                        g_gerd->getHeight() * (bottom - top) / 480);
+    /* Wide canvas: map through the centered window; the automap's own view
+       plane replaces any Hor+ widening, so the world is drawn narrow again. */
+    w8_ulong mapped[4];
+    MapRectToOutput(left, top, right, bottom, g_gerd->getWidth(), g_gerd->getHeight(), false,
+                    mapped);
+    g_gerd->setViewPort(mapped[0], mapped[1], mapped[2], mapped[3]);
+    g_hor_plus_widened = false;
     g_viewport.left = left;
     g_viewport.top = top;
     g_viewport.right = right;
@@ -2174,6 +2935,7 @@ void SetViewport(int left, int top, int right, int bottom)
     g_viewport.top = top;
     fractional_right = g_viewport.right * g_viewport_x_scale;
     fractional_bottom = g_viewport.bottom * g_viewport_y_scale;
+    g_hor_plus_widened = false; /* wide canvas: set again below if Hor+ applies */
 
     if (g_world != 0 && g_world->camera != 0) {
         g_world->camera->setViewPlane(
@@ -2186,9 +2948,42 @@ void SetViewport(int left, int top, int right, int bottom)
         plane.bottom = (g_double_one - fractional_bottom) * (view.top - view.bottom) + view.bottom;
         plane.top = (g_double_one - fractional_top) * (view.top - view.bottom) + view.bottom;
 
-        g_world->camera->setViewPlane(plane, 1.0);
+        /* Wide canvas Hor+ (ported from our DLL, hooks_view3d.cpp): when the
+           3D view touches the 4:3 edges (modes 0, 1, 6 and full-screen menus)
+           the plane is extended along the same line to the canvas edges,
+           640-space -ox .. 640+ox. Same degrees per pixel, same vertical angle;
+           RenderScene then draws the world over the full canvas width. */
+        srCamera::Rect applied = plane;
+        if (CanvasHorPlusApplies(left, g_viewport.right)) {
+            double span = view.right - view.left;
+            applied.left = -g_canvas_ox * static_cast<double>(g_viewport_x_scale) * span + view.left;
+            applied.right =
+                (640 + g_canvas_ox) * static_cast<double>(g_viewport_x_scale) * span + view.left;
+            g_hor_plus_widened = true;
+            g_hor_plus_camera = g_world->camera;
+            g_hor_plus_plane = plane;
+            g_hor_plus_wide = applied;
+        }
+
+        /* Layout A: (left, right) is the retail rectangle widened by ox; keep
+           the retail plane too (RenderWorldToSurface narrows the thumbnail). */
+        g_layout_plane_valid = false;
+        if (CanvasWideLayoutActive()) {
+            double span = view.right - view.left;
+            g_layout_retail_plane = plane;
+            g_layout_retail_plane.left =
+                (left + g_canvas_ox) * static_cast<double>(g_viewport_x_scale) * span + view.left;
+            g_layout_retail_plane.right =
+                (g_viewport.right - g_canvas_ox) * static_cast<double>(g_viewport_x_scale) * span +
+                view.left;
+            g_layout_wide_plane = applied;
+            g_layout_plane_camera = g_world->camera;
+            g_layout_plane_valid = true;
+        }
+
+        g_world->camera->setViewPlane(applied, 1.0);
         if (g_secondary_world != 0) {
-            g_secondary_world->camera->setViewPlane(plane, 1.0);
+            g_secondary_world->camera->setViewPlane(applied, 1.0);
         }
         if (g_camera_sway_active) {
             SetCameraSwayMode(g_world->camera, 1);
@@ -2234,7 +3029,7 @@ void DrawVideoInspector(int left, unsigned int top)
     if (description.lpSurface != 0) {
         if (top < bottom) {
             row = static_cast<unsigned char*>(description.lpSurface) + description.lPitch * top +
-                  left * 2;
+                  (left + CanvasDrawOrigin()) * 2; /* wide canvas: game x -> canvas x */
             for (rows = bottom - top; rows != 0; --rows) {
                 memset(row, 0, 0x226);
                 row += description.lPitch;
@@ -2460,7 +3255,8 @@ unsigned char InitializeRendererSceneObjects(void)
     view.left = 0.0;
     view.bottom = 0.0;
     view.right = 1.0;
-    view.top = 0.75;
+    /* Wide canvas: equal units on both axes = 480/W (retail 0.75 = 480/640). */
+    view.top = g_canvas_w == 640 ? 0.75 : CanvasSquareTop();
     g_square_camera->setViewPlane(view, 1.0);
     g_square_camera->setEnvironmentRange(0.0f, 0.0f);
 
@@ -2488,13 +3284,31 @@ unsigned char InitializeRendererSceneObjects(void)
     surface_description.dwSize = sizeof(surface_description);
     DDLockSurface(g_primary_surface, 0, &surface_description, 0, 0);
     DDUnlockSurface(g_primary_surface, 0);
+    /* Wide canvas: the renderer-side view of the whole W x 480 surface; the
+       tiler makes W/128 columns (856 needs a partial 7th, like the partial
+       4th row 480/128 retail already has). */
+    /* Mod (window zone layout): the 2D texture takes pixels from a separate display
+       buffer (FlushDirtyTiles composites it from the DD surface); the game's direct writes
+       to the surface (DrawColorSurface) go through g_work_color_surface. */
+    if (s_display_pixels == 0) {
+        s_display_pixels = new unsigned short[static_cast<size_t>(g_canvas_w) * 480];
+        s_clean_pixels = new unsigned short[static_cast<size_t>(g_canvas_w) * 480];
+    }
+    memset(s_display_pixels, 0, static_cast<size_t>(g_canvas_w) * 480 * 2);
+    memset(s_clean_pixels, 0, static_cast<size_t>(g_canvas_w) * 480 * 2);
+    ReleaseRendererObject(g_work_color_surface);
+    g_work_color_surface = SR_NEW(W8ColorSurface)(
+        srPixelConvert::SURFACE_ARGB1555, surface_description.lpSurface,
+        static_cast<w8_ulong>(g_canvas_w), 480UL, static_cast<w8_ulong>(surface_description.lPitch));
     g_primary_color_surface =
-        SR_NEW(W8ColorSurface)(srPixelConvert::SURFACE_ARGB1555, surface_description.lpSurface,
-                               640UL, 480UL, static_cast<w8_ulong>(surface_description.lPitch));
-    if (!g_primary_color_surface)
+        SR_NEW(W8ColorSurface)(srPixelConvert::SURFACE_ARGB1555, s_display_pixels,
+                               static_cast<w8_ulong>(g_canvas_w), 480UL,
+                               static_cast<w8_ulong>(g_canvas_w) * 2);
+    if (!g_primary_color_surface || !g_work_color_surface)
         return 0;
 
-    g_surface_node = new stSurface2D(g_primary_color_surface, 640, 480, g_scene_overlay0, 128);
+    g_surface_node = new stSurface2D(g_primary_color_surface, g_canvas_w, 480, g_scene_overlay0,
+                                     SurfaceTileExtent(g_canvas_w, 480));
     if (!g_surface_node)
         return 0;
 
@@ -2525,7 +3339,8 @@ void ClearSurfaceRect(int left, unsigned int top, int right, unsigned int bottom
     DDLockSurface(g_primary_surface, 0, &surface_description, 0, 0);
     if (surface_description.lpSurface != 0) {
         if (top < bottom) {
-            row = static_cast<unsigned char*>(surface_description.lpSurface) + left * 2 +
+            row = static_cast<unsigned char*>(surface_description.lpSurface) +
+                  (left + CanvasDrawOrigin()) * 2 + /* wide canvas: game x -> canvas x */
                   surface_description.lPitch * top;
             rows = bottom - top;
             do {
@@ -2871,7 +3686,17 @@ void __fastcall PackColourBytes(unsigned char* colour, double alpha, double red,
 void PositionToolTipNode(srNode* node, int x, int y, bool positional)
 {
     stModelInstance2D* instance = static_cast<stModelInstance2D*>(node);
-    double position_x = x * g_inverse_screen_width;
+    /* Wide canvas: (x, y) is game space; the node sits ox pixels right on the
+       canvas and widths are fractions of W (radar, formation board, automap
+       markers, tooltips all come through here). */
+    const double inverse_width = CanvasInverseWidth();
+    /* Layout A: CanvasDrawOrigin() is ox, or 0 / 2*ox inside a CanvasDrawScope
+       (radar and formation board are anchored to the canvas edges). */
+    /* Window zone layout: the tooltip and markers go where the layout moved their point. */
+    double position_x =
+        (CanvasZoneLayoutActive() && CanvasDrawOrigin() == g_canvas_ox ? CanvasZoneMapX(x, y)
+                                                                        : x + CanvasDrawOrigin()) *
+        inverse_width;
     double position_y = y * g_inverse_screen_height;
 
     if (positional && g_gerd != 0) {
@@ -2885,7 +3710,7 @@ void PositionToolTipNode(srNode* node, int x, int y, bool positional)
     }
 
     int width = instance->GetScaledWidth();
-    double half_width = width * g_inverse_screen_width * g_double_half;
+    double half_width = width * inverse_width * g_double_half;
     int height = instance->GetScaledHeight();
     double half_height = height * g_inverse_screen_height * g_double_half;
 
@@ -2896,7 +3721,9 @@ void PositionToolTipNode(srNode* node, int x, int y, bool positional)
         location.y = g_double_one - (half_height + position_y);
         g_paired_render_mode = 2;
     } else {
-        location.y = g_double_three_quarters - (half_height + position_y) * g_double_three_quarters;
+        /* Wide canvas: the square camera's top is 480/W (retail 0.75). */
+        const double square_top = g_canvas_w == 640 ? g_double_three_quarters : CanvasSquareTop();
+        location.y = square_top - (half_height + position_y) * square_top;
     }
     node->setLocation(location);
     SetOverlayRenderMode();
@@ -2914,7 +3741,8 @@ srModelInstance* Video2DRectToSquarePolygon(const W8ControlsRect* rect, void* so
 {
     int extent = (rect->bottom - rect->top) + 2;
     int width_extent = (rect->right - rect->left) + 2;
-    double width = rect->right * g_inverse_screen_width - rect->left * g_inverse_screen_width;
+    /* Wide canvas: fraction of W (the square scene uses it for both axes). */
+    double width = rect->right * CanvasInverseWidth() - rect->left * CanvasInverseWidth();
     if (extent < width_extent) {
         extent = width_extent;
     }
@@ -3045,7 +3873,7 @@ stModelInstance2D* CreateSpriteFromVideoSurface(int target, const W8ControlsRect
 stModelInstance2D* CreateColoredPolygonSprite(int width, int height, const srVector4T<float>* color,
                                               bool fullscreen)
 {
-    double scale_x = width * g_inverse_screen_width;
+    double scale_x = width * CanvasInverseWidth(); /* wide canvas: fraction of W */
     double scale_y = height * g_inverse_screen_height;
     srMeshModel* model = SR_NEW(srMeshModel)(0L, 0L);
     model->autoRelease();
@@ -3156,6 +3984,10 @@ unsigned char CopySurfaceWithBorder(srColorSurface* surface, const W8ControlsRec
     Blt16BPPTo16BPP(dest, dest_pitch, src, src_pitch, right, 1, rect->left - 1 + width, rect->top,
                     1, height);
     Blt16BPPTo16BPP(dest, dest_pitch, src, src_pitch, 0, 0, rect->left, rect->top, 1, 1);
+    /* Retail 0x428D28 pushes (iDestX = 0, iDestY = width + 1) here - an
+       original slip that writes this corner texel into the left border column.
+       Kept as the obviously intended top-right corner (one texel; tooltips
+       look the same). Found by the 2026-10-12 call-order audit. */
     Blt16BPPTo16BPP(dest, dest_pitch, src, src_pitch, right, 0, rect->left - 1 + width, rect->top,
                     1, 1);
     Blt16BPPTo16BPP(dest, dest_pitch, src, src_pitch, 0, bottom, rect->left, rect->top - 1 + height,
@@ -3181,11 +4013,13 @@ unsigned char CopySurfaceWithBorder(srColorSurface* surface, const W8ControlsRec
 srModelInstance* Video2DRectToPolygon(const W8ControlsRect* rect, void* source, int source_pitch,
                                       srNode* parent, unsigned char overlay)
 {
-    double left = rect->left * g_inverse_screen_width;
+    /* Wide canvas: the rect is game space; placed ox pixels right on the
+       canvas, widths as fractions of W. */
+    double left = (rect->left + CanvasDrawOrigin()) * CanvasInverseWidth();
     int extent = rect->right - rect->left;
     double top = rect->top * g_inverse_screen_height;
     int rect_height = rect->bottom - rect->top;
-    double width = rect->right * g_inverse_screen_width - left;
+    double width = (rect->right + CanvasDrawOrigin()) * CanvasInverseWidth() - left;
     double height = rect->bottom * g_inverse_screen_height - top;
 
     if (extent <= rect_height) {
@@ -3279,9 +4113,14 @@ void VideoToolTip(CHAR16* text)
     surface->fill(0);
     void* data = surface->getDataPtr();
     unsigned char colour[4];
+    /* Port fix (2026-10-12): srColorSurface::setHLine(y, x_start,
+       x_end) - the row comes first. The reconstructed code passed (0, y, w):
+       all the "background rows" and the bottom border were drawn in row 0, the tooltip
+       background was transparent, and there was no bottom border. In the original Wiz8.exe (checked
+       live) the background is black and the border is complete. */
     for (int y = 0; y < g_help_box_height; ++y) {
         PackColourBytes(colour, 1.0, 0.0, 0.0, 0.0);
-        surface->setHLine(0, y, g_help_box_width, *(w8_ulong*)colour);
+        surface->setHLine(y, 0, g_help_box_width, *(w8_ulong*)colour);
     }
     buffer->RenderText(static_cast<unsigned char*>(data),
                        static_cast<unsigned int>(surface->getPitch()), 2, 1, true);
@@ -3289,7 +4128,7 @@ void VideoToolTip(CHAR16* text)
     PackColourToLong(&border_colour, 1.0, 0.93, 0.6, 0.33);
     surface->setHLine(0, 0, g_help_box_width, border_colour);
     PackColourToLong(&border_colour, 1.0, 0.93, 0.6, 0.33);
-    surface->setHLine(0, g_help_box_height - 1, g_help_box_width, border_colour);
+    surface->setHLine(g_help_box_height - 1, 0, g_help_box_width, border_colour);
     PackColourToLong(&border_colour, 1.0, 0.93, 0.6, 0.33);
     surface->setVLine(0, 0, g_help_box_height, border_colour);
     PackColourToLong(&border_colour, 1.0, 0.93, 0.6, 0.33);
@@ -3678,7 +4517,10 @@ void __fastcall ReleaseOwnedMember(Video2PosterQuadInfo* object)
 // FUNCTION: WIZ8 0x00425590
 void DrawColorSurface(srColorSurface* surface, int x, int y)
 {
-    g_primary_color_surface->blit(x, y, *surface, 0, 0, surface->getWidth(), surface->getHeight());
+    /* Wide canvas: the work surface (DD memory the game draws into) covers the
+       whole W-wide canvas; the display buffer is composed from it. */
+    g_work_color_surface->blit(x + CanvasDrawOrigin(), y, *surface, 0, 0, surface->getWidth(),
+                               surface->getHeight());
 }
 
 // FUNCTION: WIZ8 0x00425DA0
@@ -3693,10 +4535,15 @@ void SetWorldScaledViewport(int left, int top, int right, int bottom)
             goto store;
         }
     }
-    g_gerd->setViewPort(g_gerd->getWidth() * left / 640, g_gerd->getHeight() * top / 480,
-                        g_gerd->getWidth() * (right - left) / 640,
-                        g_gerd->getHeight() * (bottom - top) / 480);
+    {
+        /* Wide canvas: same mapping as RenderScene (x + ox) * width / W. */
+        w8_ulong mapped[4];
+        MapRectToOutput(left, top, right, bottom, g_gerd->getWidth(), g_gerd->getHeight(), false,
+                        mapped);
+        g_gerd->setViewPort(mapped[0], mapped[1], mapped[2], mapped[3]);
+    }
 store:
+    g_hor_plus_widened = false; /* wide canvas: g_viewport no longer SetViewport's */
     g_viewport.left = left;
     g_viewport.top = top;
     g_viewport.right = right;

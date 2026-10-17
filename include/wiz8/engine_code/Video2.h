@@ -14,6 +14,7 @@
 #include "DirectDraw Calls.h"
 #include "vsurface.h"
 #include "Mutex Manager.h"
+#include "wiz8/canvas.h"
 
 #define BUFFER_READY 0x00
 #define BUFFER_BUSY 0x01
@@ -36,6 +37,18 @@ extern void InvalidateRegion(INT32 iLeft, INT32 iTop, INT32 iRight, INT32 iBotto
 extern LPDIRECTDRAW2 GetDirectDraw2Object(void);
 extern LPDIRECTDRAWSURFACE2 GetFrameBufferObject(void);
 extern PTR LockPrimarySurface(UINT32* uiPitch);
+/* Wide canvas: LockPrimarySurface returns the centered 640x480 window; this
+   returns the start of the whole W-wide surface (for full clears). */
+extern PTR LockPrimarySurfaceFull(UINT32* uiPitch);
+/* Wide canvas: invalidate every dirty cell of the W x 480 canvas. */
+extern void InvalidateCanvas(UINT32 uiFlags);
+/* Wide canvas: invalidate only the two side bars (outside the 640 window),
+   even when the page is already marked as fully dirty (wide_art.h). */
+extern void InvalidateCanvasSideBars(UINT32 uiFlags);
+/* Side of the square stSurface2D tile for a width x height 2D layer: 128 as
+   retail, or one power-of-two texture covering it all when
+   [Display] SingleTexture2D=1 and the renderer allows that size (canvas.h). */
+extern int SurfaceTileExtent(int width, int height);
 extern void UnlockPrimarySurface(void);
 extern PTR LockMouseBuffer(UINT32* uiPitch);
 extern void UnlockMouseBuffer(void);
@@ -111,6 +124,9 @@ stModelInstance2D* CreateSpriteFromTexture(srTextureIFace* texture, double width
    scissored viewport, then blit the locked frame buffer onto the target. */
 unsigned char RenderWorldToSurface(srColorSurface* target, W8ScreenRect* rect,
                                    bool render_secondary);
+/* Wide automap: the same capture with the whole output standing for the W x
+   480 canvas; rect is game space (may reach -ox .. 640+ox), target is W x 480. */
+unsigned char RenderWorldToCanvasSurface(srColorSurface* target, W8ScreenRect* rect);
 void SetPickKey(void* key);
 
 struct W8ControlsRect;
@@ -158,7 +174,7 @@ srModelInstance* MakePolygonBrush(srNode* parent, srColorSurfaceIFace* surface, 
                                   float mapping_width, float mapping_height, unsigned char overlay);
 /* 0x00484A40: blit one frame of a video object into a color surface. */
 BOOLEAN BlitVideoObjectToColorSurface(UINT32 video_object, UINT16 region,
-                                      srColorSurface* destination, UINT16 x, UINT16 y);
+                                      srColorSurface* destination, INT32 x, INT32 y);
 /* 0x00484AC0: same blit with an already-resolved HVOBJECT. */
 BOOLEAN BlitHVObjectToColorSurface(HVOBJECT object, UINT16 region, srColorSurface* destination,
                                    int x, int y);
@@ -222,7 +238,7 @@ extern LPDIRECTDRAWSURFACE2 g_primary_surface;
 extern stSurface2D* g_surface_node;
 extern srMaterial* g_blit_material;
 extern srColorSurface* g_mouse_surface;
-extern srNode* g_surface_nodes[0x12c0];
+extern srNode* g_surface_nodes[W8_CANVAS_MAX_CELLS];
 extern unsigned char g_block[0x12c0];
 extern IDirectDraw2* g_direct_draw2;
 extern IDirectDrawSurface* g_video_primary_surface1;

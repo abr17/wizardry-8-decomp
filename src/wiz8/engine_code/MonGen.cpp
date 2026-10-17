@@ -281,7 +281,7 @@ int MonGen::SelectEncounterCandidates(W8EncounterTableRuntime* table,
 
 /* Bias the database's group-size dice by party-relative monster level and the
    configured difficulty. Strong encounters are pushed toward the lower half on
-   normal difficulty and weak tiny encounters toward the upper half; novice and
+   normal difficulty and weak encounters (relative level <= 0.8) toward the upper half; novice and
    expert take the corresponding fixed extremes in those branches. */
 // FUNCTION: WIZ8 0x0048BC30
 int MonGen::RollEncounterGroupSize(W8MonsterRecord* record)
@@ -306,8 +306,9 @@ int MonGen::RollEncounterGroupSize(W8MonsterRecord* record)
         return rolled;
     }
 
-    /* Retail really compares the midpoint here, not relative_level. */
-    if (midpoint > 0.8f) {
+    /* Retail 0x0048BD10: fld [esp+8] is relative_level (not the midpoint) vs 0.8f;
+       je on test ah,0x41 returns the raw roll only when ordered and above, so NaN falls through. */
+    if (relative_level > 0.8f) {
         return rolled;
     }
     if (g_settings.difficulty == W8_DIFFICULTY_EXPERT) {
@@ -473,8 +474,13 @@ bool MonGen::CanGenerateEncounter(bool force)
         if (distance > 200000.0f || distance < 35000.0f) {
             return false;
         }
-        if (g_octree != 0 && g_octree->HasLineOfSight(&camera, &spawn_position, true)) {
-            return false;
+        if (g_octree != 0) {
+            /* Retail 0x0048B259: passes a stack copy of spawn_position, because
+               HasLineOfSight overwrites *to with the hit point when blocked. */
+            srVector3T<float> target = spawn_position;
+            if (g_octree->HasLineOfSight(&camera, &target, true)) {
+                return false;
+            }
         }
     }
 
@@ -1135,12 +1141,14 @@ void MonGen::SetState(const srVector3T<float>* state)
    what installs the first. SetActive then applies the requested state, including its own conditional
    second load. */
 // FUNCTION: WIZ8 0x0048b850
-void MonGen::Reload(int, bool active)
+void MonGen::Reload(int active, bool)
 {
     LoadMonsterGeneratorMarker(this);
+    /* Retail 0x0048B8CA: the armed state is the sole stack argument (ret 4), read
+       as byte [esp+0x20]; the port's first parameter carries it, the bool is unused. */
     /* SetActive never reads its second argument. Its value at this retail
        expansion is unrecoverable; zero represents the unused argument. */
-    SetActive(active, 0);
+    SetActive(static_cast<unsigned char>(active), 0);
 }
 
 // FUNCTION: WIZ8 0x0048cc30

@@ -233,7 +233,8 @@ unsigned char ImportWizardry7Party(char* path)
     ResetForNewGame();
     g_status.party_gold = 2500;
     g_status.skip_loose_character_check = 1;
-    if (g_import_character_count < 7) {
+    /* Retail 0x00558C80: unsigned compare (cmp eax,6; jbe), so a negative count returns 1. */
+    if (static_cast<unsigned int>(g_import_character_count) < 7) {
         for (index = 0; index < g_import_character_count; ++index) {
             ImportWizardry7Character(&scratch, &g_imported_characters[index]);
             if (AddCharacterToParty(&scratch, -1) == -1) {
@@ -304,7 +305,8 @@ void ImportWizardry7Character(W8Character* character, W8Wiz7Character* imported)
     }
     character->iProfession = profession;
     CalcCharacterTableValue(character);
-    level = static_cast<unsigned short>(imported->level);
+    /* Retail 0x0055917D: movsx, the short level is sign-extended. */
+    level = static_cast<unsigned int>(static_cast<int>(imported->level));
     if (imported->level > 0) {
         level = 1;
     }
@@ -416,6 +418,8 @@ void ConvertAttribute(W8Character* character, const W8Wiz7Character* imported)
         }
     }
     average = total / 6;
+    /* Retail 0x005593F0: the average is stored into values[6] (Senses) before the +0x28 bonuses. */
+    imported_values[6] = static_cast<unsigned int>(average);
     for (i = 0; i < 3; ++i) {
         imported_values[g_profession_primary_attributes[character->iProfession][i]] += 0x28;
     }
@@ -704,19 +708,21 @@ unsigned int ConvertSkill(W8Skill skill_id, W8Character* character, const W8Wiz7
     case W8_SKILL_BOW:
         mapped = 7;
         break;
-    case W8_SKILL_MARTIAL_ARTS:
+    /* Retail 0x00559C60..0x00559C7C (jump table 0x00559FCC): 0xA->0x10, 0xB->0x11,
+       0xC->0xD, 0xD->0xF, 0xE->9. */
+    case W8_SKILL_LOCKS_TRAPS:
         mapped = 0x10;
         break;
-    case W8_SKILL_LOCKS_TRAPS:
+    case W8_SKILL_STEALTH:
         mapped = 0x11;
         break;
-    case W8_SKILL_STEALTH:
+    case W8_SKILL_MUSIC:
         mapped = 0xd;
         break;
-    case W8_SKILL_MUSIC:
+    case W8_SKILL_PICKPOCKET:
         mapped = 0xf;
         break;
-    case W8_SKILL_PICKPOCKET:
+    case W8_SKILL_MARTIAL_ARTS:
         mapped = 9;
         break;
     case W8_SKILL_SCOUTING:

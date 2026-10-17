@@ -1,3 +1,4 @@
+#include "wiz8/canvas.h"
 #include "wiz8/fonts.h"
 #include "wiz8/engine_code/Camera.h"
 #include "wiz8/integer_constants.h"
@@ -103,6 +104,8 @@ void RedrawPortraitQuoteBubbles(void)
             !slot->portrait_event_active) {
             continue;
         }
+        /* Wide canvas layout A: the bubble hangs next to the slot's column. */
+        CanvasDrawScope layout_scope(CanvasPartySlotAnchor(static_cast<int>(party_slot)));
         DrawPortraitQuoteBubble(slot->quote.quote_handle, slot->quote.x, slot->quote.y, -0xe);
     }
 }
@@ -931,6 +934,7 @@ void SetPartyPortraitEventState(unsigned int party_slot, bool active, unsigned i
              !g_level_block->review_transition_active)) {
             int left = quote->x;
             int top = quote->y;
+            CanvasDrawScope layout_scope(CanvasPartySlotAnchor(static_cast<int>(party_slot)));
             ClearSurfaceRect(left, top, quote->width + left, quote->height + top);
             InvalidateRegion(left, top, quote->width + left, quote->height + top, 0);
         }
@@ -1011,7 +1015,8 @@ void SetPartyPortraitEventState(unsigned int party_slot, bool active, unsigned i
             quote->height = height;
             if (g_current_screen_state.id == W8_SCREEN_CAMP) {
                 if (static_cast<int>(party_slot) == giReviewCharSlot) {
-                    quote->x = 10;
+                    /* Retail 0x0052FA49: mov word [esi+0x1d],0x10a (x = 266), not 10. */
+                    quote->x = 0x10a;
                     quote->y = 8;
                 } else {
                     quote->x = static_cast<unsigned short>(((party_slot & 1) * 0x30) + 0x36);
@@ -1285,7 +1290,9 @@ void W8CharacterEventQueue::ProcessDeferredCharacterEvents()
             }
             for (index = conflict_count - 1; index >= 0; --index) {
                 if (conflict_indices[index] != -1) {
-                    pending_events.RemoveAtAndDelete(conflict_indices[index]);
+                    /* Retail 0x0052DEE3..0x0052DF25 removes and deletes pending_events[index]
+                       (the loop counter); the slot value only gates the step. */
+                    pending_events.RemoveAtAndDelete(index);
                 }
             }
         }
@@ -1304,10 +1311,12 @@ void W8CharacterEventQueue::ProcessDeferredCharacterEvents()
     while (index < pending_events.GetCount()) {
         entry = *pending_events.GetAt(index);
         event_type = entry->event_type;
-        if (g_current_screen_state.id != W8_SCREEN_MAIN_GAME) {
-            unsigned int descriptor_index;
-            if (MapEventTypeToDescriptorIndex(event_type, &descriptor_index) &&
-                g_character_event_descriptors[descriptor_index].defer_outside_main_game != 0) {
+        /* Retail 0x0052DF8E: "cmp type,[g_normal_event_count]; ja process" runs before the
+           500..530 remap, so types above 146 are never deferred (the remap is dead code);
+           types 0..146 index the descriptor table directly. */
+        if (g_current_screen_state.id != W8_SCREEN_MAIN_GAME &&
+            event_type <= g_normal_event_count) {
+            if (g_character_event_descriptors[event_type].defer_outside_main_game != 0) {
                 ++index;
                 continue;
             }
@@ -1407,7 +1416,10 @@ void SetPortraitTargetPose(W8MonsterManagerEntry* slot, int pose)
     int party_slot = RPCPtrToPCSlot(slot);
 
     slot->portrait_pose_animation_active = false;
-    if (g_status.buffers.Char[party_slot].highest_condition < W8_CONDITION_ASLEEP &&
+    /* Retail 0x0052f031 compares the condition unsigned (cmp 0xf / jae), so a
+       condition >= 0x80000000 forces pose 2 (found by the w8diff harness). */
+    if (static_cast<unsigned int>(g_status.buffers.Char[party_slot].highest_condition) <
+            static_cast<unsigned int>(W8_CONDITION_ASLEEP) &&
         !gXStatus.fSurprisePossible) {
         if (slot->target_portrait_pose != pose) {
             slot->target_portrait_pose = pose;
@@ -1635,13 +1647,16 @@ void QueueConditionChangeReaction(W8Character* character)
              (g_first_remapped_event <= reaction &&
               reaction < g_remapped_event_count + g_first_remapped_event)) &&
             (slot = GetRandomCharacter(0, 0, excluded_slot, -1)) != -1) {
+            /* Retail 0x0052F6AF: a success on the 50th retry still returns without queueing. */
             attempts = 0;
-            while (!CanDispatchCharacterEvent(slot, reaction, 0)) {
-                if (attempts >= 0x32) {
-                    return;
-                }
+            bool can_dispatch = CanDispatchCharacterEvent(slot, reaction, 0) != 0;
+            while (!can_dispatch && attempts < 0x32) {
                 slot = GetRandomCharacter(0, 0, excluded_slot, -1);
                 ++attempts;
+                can_dispatch = CanDispatchCharacterEvent(slot, reaction, 0) != 0;
+            }
+            if (attempts == 0x32) {
+                return;
             }
             QueueCharacterEvent(&g_status.buffers.Char[slot], reaction, 0, g_effect_argument0,
                                 g_character_event_full_volume);
@@ -1865,7 +1880,11 @@ int UpdateCharacterEventState(void)
                     record->previous_portrait_pose = pose;
                     record->portrait_pose =
                         g_portrait_pose_transition[pose - 1][record->target_portrait_pose - 1];
-                    record->portrait_pose_animation_active = true;
+                    /* Retail 0x0052EA33 writes [esi+0x99] with ESI = entry + 1,
+                       i.e. portrait_pose_dirty (entry+0x9a), not the animation
+                       flag: with the flag, a blink never returned to open eyes
+                       and every portrait looked asleep. */
+                    record->portrait_pose_dirty = true;
                     record->portrait_pose_clock = SetCountdownClock(Random(50) + 50);
                 }
             } else if (ClockIsTicking(record->portrait_pose_clock) == 0) {
@@ -1873,7 +1892,7 @@ int UpdateCharacterEventState(void)
                 if (pose != 2) {
                     record->previous_portrait_pose = pose;
                     record->portrait_pose = g_portrait_pose_transition[pose - 1][2 - 1];
-                    record->portrait_pose_animation_active = true;
+                    record->portrait_pose_dirty = true; /* retail 0x0052E9AD, see above */
                     record->portrait_pose_clock = SetCountdownClock(Random(50) + 50);
                 }
                 if (record->portrait_pose == 2) {

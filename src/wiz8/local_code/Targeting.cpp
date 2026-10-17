@@ -208,10 +208,18 @@ bool ShouldClearAimForAppliedTarget(W8TargetSource* source, W8CombatSlot* target
         srAssertFail("FALSE", TARGETING_CPP, 0xe11, 0);
         return false;
     }
+    /* Retail 0x0053c5d2 tests the action byte (test al,al) and answers a literal 0
+       or 1, so a bool byte other than 0/1 still comes back as 1; read the raw byte
+       through volatile so the compiler cannot pass it through unnormalized (a plain
+       byte read still came back as 2/0xfe; found by the w8diff harness). */
+    // reinterpret-ok: the raw argument byte, which is what retail's test al,al sees
+    const unsigned char raw =
+        *reinterpret_cast<const volatile unsigned char*>(&action_targets_enemies);
+    const bool targets_enemies = raw != 0;
     if (source_hostile == target_hostile) {
-        return action_targets_enemies;
+        return targets_enemies;
     }
-    return !action_targets_enemies;
+    return !targets_enemies;
 }
 
 /* The faction names, thirty bytes apart, in the same order as the faction ids.
@@ -440,14 +448,15 @@ void AimAtCharacterIndirect(int actor, int character_slot, W8TargetingContext co
 void AimAtPlace(int actor)
 {
     W8CombatSlot target;
-    srVector3T<float> position;
 
     memset(&target, 0, sizeof(target));
     target.iMonsterID = BAD_INDEX;
     target.iChar = BAD_INDEX;
     target.iGroupID = BAD_INDEX;
     target.iType = W8_TARGET_KIND_PLACE;
-    GetWorldCursorTargetPosition(&position);
+    /* Retail 0x00538730: the cursor position is written straight into the
+       target block's point (target+0x10) before AimAtTarget. */
+    GetWorldCursorTargetPosition(&target.point);
     AimAtTarget(actor, &target, W8_TARGETING_CONTEXT_CURRENT);
     ClearTargetMarker();
 }
@@ -664,8 +673,11 @@ void RepickInvalidCombatTargets(void)
     for (int party_slot = 0; party_slot < 8; ++party_slot) {
         W8PartySlotRow* row = &g_status.buffers.XChar[party_slot];
         W8Character* character = &g_status.buffers.Char[party_slot];
+        /* Retail 0x00536430 compares the condition unsigned (cmp 0xd / jae), seen
+           while triaging w8diff harness diffs of its siblings. */
         if (!row->fOccupied || character->hp_current == 0 ||
-            character->highest_condition >= W8_CONDITION_TURNCOAT ||
+            static_cast<unsigned int>(character->highest_condition) >=
+                static_cast<unsigned int>(W8_CONDITION_TURNCOAT) ||
             !CharacterCanSwitchTo(party_slot, W8_TARGETING_CONTEXT_IN_COMBAT, true, false)) {
             continue;
         }
@@ -847,7 +859,9 @@ int PickNearestMonsterUnderCursor(int cursor_x, int cursor_y)
             continue;
         }
         distance = MonsterDistanceToCamera(GetWorld(), monster_info->p3D);
-        if (distance < best_distance) {
+        /* Retail 0x00539763: FCOM + TEST AH,1 (C0) takes the candidate for
+           "less" and for an unordered (NaN) distance, hence !(>=). */
+        if (!(distance >= best_distance)) {
             result = monster_info->location_id;
             best_distance = distance;
         }
@@ -861,7 +875,8 @@ int PickNearestMonsterUnderCursor(int cursor_x, int cursor_y)
                 continue;
             }
             distance = MonsterDistanceToCamera(GetWorld(), monster_info->p3D);
-            if (distance < best_distance) {
+            /* Retail 0x0053982B: same C0 test as above - NaN also wins. */
+            if (!(distance >= best_distance)) {
                 result = monster_info->location_id;
                 best_distance = distance;
             }
@@ -944,10 +959,13 @@ static int CompareMonsterTargetCandidates(const void* left, const void* right)
     const W8MonsterTargetCandidate* a = (const W8MonsterTargetCandidate*)left;
     const W8MonsterTargetCandidate* b = (const W8MonsterTargetCandidate*)right;
 
-    if (a->state < b->state) {
+    /* Retail 0x0053c92f compares the state unsigned (jae/jbe), and 0x0053c96e takes an
+       unordered (NaN) distance as "less" (FCOMP + TEST AH,1) (found by the w8diff
+       harness). */
+    if (static_cast<unsigned int>(a->state) < static_cast<unsigned int>(b->state)) {
         return -1;
     }
-    if (a->state > b->state) {
+    if (static_cast<unsigned int>(a->state) > static_cast<unsigned int>(b->state)) {
         return 1;
     }
     if (a->in_reach != 0 && b->in_reach == 0) {
@@ -956,7 +974,7 @@ static int CompareMonsterTargetCandidates(const void* left, const void* right)
     if (a->in_reach == 0 && b->in_reach != 0) {
         return 1;
     }
-    if (a->distance < b->distance) {
+    if (!(a->distance >= b->distance)) {
         return -1;
     }
     if (a->distance > b->distance) {
@@ -1324,7 +1342,9 @@ void CollectMonstersWithinRadius(const srVector3T<float>* centre, const srVector
 {
     unsigned int index;
 
-    if (radius == g_float_zero) {
+    /* Retail 0x00539E77: FCOMP + TEST AH,40h returns when C3 is set - for
+       "equal" and for an unordered (NaN) radius. */
+    if (radius == g_float_zero || radius != radius) {
         return;
     }
 
@@ -1342,7 +1362,11 @@ void CollectMonstersWithinRadius(const srVector3T<float>* centre, const srVector
         if (record->untargetable != 0) {
             continue;
         }
-        if (monster_info->ubDisposition != side && side != W8_SIDE_ANY) {
+        /* Retail 0x00539ef9 compares the two bytes (cmp byte ptr [edi+16h], al), so
+           side 0xff matches disposition 0xff; a signed char side would read -1
+           (found by the w8diff harness). */
+        if (monster_info->ubDisposition != static_cast<unsigned char>(side) &&
+            side != W8_SIDE_ANY) {
             continue;
         }
 
@@ -1449,7 +1473,8 @@ W8CombatSlot* GetTargetBlockForContext(int party_slot, W8TargetingContext contex
     case W8_TARGETING_CONTEXT_DIALOGUE:
         return 0;
     default:
-        srAssertFail("FALSE", TARGETING_CPP, 0xc37, 0);
+        /* Retail 0x0053b8d6 asserts line 0xc2f (found by the w8diff harness). */
+        srAssertFail("FALSE", TARGETING_CPP, 0xc2f, 0);
     }
     return &row->target_in_combat;
 }
@@ -1703,7 +1728,9 @@ bool IsTargetSourceInRangeOfGroup(const W8TargetSource* source, W8MonsterGroup* 
             }
             distance = member->GetDistanceToMonster(source_monster);
         }
-        if (distance <= max_distance) {
+        /* Retail 0x005378F1: FCOMP + TEST AH,41h returns true for less, equal
+           and unordered (NaN) - only "greater" skips the member, hence !(>). */
+        if (!(distance > max_distance)) {
             return true;
         }
     }
@@ -1840,7 +1867,9 @@ void RefreshSpellTargetHighlightsAtRange(void)
     W8MonsterInfo* monster_info;
 
     GetCameraForwardPoint(GetGroundTargetRange(), &position);
-    if ((position == gXStatus.target_position)) {
+    /* Retail 0x0053B353: REP CMPSD over 3 dwords - a bitwise compare, not
+       float == (NaN with the same bits is "same", -0.0 and +0.0 differ). */
+    if (memcmp(&position, &gXStatus.target_position, sizeof(position)) == 0) {
         return;
     }
 
@@ -1965,7 +1994,9 @@ void RefreshTargetMarker(void)
     srVector3T<float> position;
 
     GetWorldCursorTargetPosition(&position);
-    if (!(position == gXStatus.target_position)) {
+    /* Retail 0x0053B192: REP CMPSD over 3 dwords - a bitwise compare, not
+       float == (NaN with the same bits is "same", -0.0 and +0.0 differ). */
+    if (memcmp(&position, &gXStatus.target_position, sizeof(position)) != 0) {
         gXStatus.target_position = position;
         PopulateTargetMarkerForCurrentAction(&position, &gXStatus.target_markers, 1);
     }
@@ -1993,9 +2024,12 @@ bool IsDeadCharacterTargetable(int party_slot)
 // FUNCTION: WIZ8 0x0053C270
 bool CanPartySlotParticipate(int party_slot)
 {
+    /* Retail 0x0053c2ab compares the condition unsigned (cmp 0x12 / jae), so a
+       condition >= 0x80000000 cannot participate (found by the w8diff harness). */
     return g_status.buffers.XChar[party_slot].fOccupied &&
            g_status.buffers.Char[party_slot].hp_current != 0 &&
-           g_status.buffers.Char[party_slot].highest_condition < W8_CONDITION_DEAD;
+           static_cast<unsigned int>(g_status.buffers.Char[party_slot].highest_condition) <
+               static_cast<unsigned int>(W8_CONDITION_DEAD);
 }
 
 /* Validate a targeting context a second time, after resolving "current". */
@@ -2145,12 +2179,18 @@ bool RepickActionTarget(int party_slot, W8TargetingContext context, int arg)
                 new_target.iGroupID = -1;
                 new_target.iType = W8_TARGET_KIND_MONSTER;
                 new_target.iMonsterID = selected;
-                AimAtTarget(party_slot, &new_target, static_cast<W8TargetingContext>(arg));
+                /* Retail 0x00536863 aims the block of the resolved context (the
+                   value it stored back over the context argument), not `arg`;
+                   with `arg` = 0 the new combat target landed in the
+                   out-of-combat block and in-combat attacks never had a target.
+                   The re-validation below likewise runs only for the
+                   out-of-combat context (0x00536891 tests the resolved value). */
+                AimAtTarget(party_slot, &new_target, action_context);
                 result = true;
                 if (arg != 0) {
                     StartBreathCycle(party_slot, false);
                 }
-                if (arg == 0) {
+                if (action_context == W8_TARGETING_CONTEXT_OUT_OF_COMBAT) {
                     if (g_settings.verbose_combat_messages != 0) {
                         PostCharacterNotice(party_slot, gppStringList[0x26b]);
                     }
@@ -2174,7 +2214,7 @@ bool RepickActionTarget(int party_slot, W8TargetingContext context, int arg)
         new_target.iChar = -1;
         new_target.iGroupID = -1;
         new_target.iType = W8_TARGET_KIND_NONE;
-        AimAtTarget(party_slot, &new_target, static_cast<W8TargetingContext>(arg));
+        AimAtTarget(party_slot, &new_target, action_context); /* 0x00536940 */
     }
     if (gXStatus.fCombatMode && action_context == W8_TARGETING_CONTEXT_IN_COMBAT &&
         target->iType != previous_kind) {
@@ -2587,7 +2627,8 @@ void AimAtMonsterGroupMember(int party_slot, W8MonsterGroup* group)
 
     picked = PickNextTargetableGroupMember(party_slot, group);
     if (picked != BAD_INDEX) {
-        block.Set(1.0f, 1.0f, 1.0f, 1.0f);
+        /* Retail 0x00537C5B: srVector4T::Set(0,1,0,1) - the targeting green. */
+        block.Set(0.0f, 1.0f, 0.0f, 1.0f);
         MonsterSetHighlightColour(GetMonsterByLocationID(picked), block);
     }
     g_level_block->pick_changed = true;
@@ -2724,8 +2765,12 @@ void RefreshAllPartyTargets(void)
         W8PartySlotRow* row = &g_status.buffers.XChar[party_slot];
         W8Character* character = &g_status.buffers.Char[party_slot];
 
+        /* Retail 0x0053bfb5 compares the condition unsigned (cmp 0x12 / jae), seen
+           while triaging w8diff harness diffs of its siblings. */
         if (row->fOccupied &&
-            (character->hp_current != 0 || character->highest_condition < W8_CONDITION_DEAD)) {
+            (character->hp_current != 0 ||
+             static_cast<unsigned int>(character->highest_condition) <
+                 static_cast<unsigned int>(W8_CONDITION_DEAD))) {
             W8CombatSlot* target =
                 GetTargetBlockForContext(party_slot, W8_TARGETING_CONTEXT_CURRENT);
             bool can_switch =
@@ -2749,10 +2794,12 @@ void RefreshAllPartyTargets(void)
                 }
             }
 
+            /* Retail 0x0053C06E..0x0053C081: the fallback runs when a swap is
+               pending or the slot can NOT switch to its in-combat target. */
             if (IsPartySlotEligible(party_slot) &&
                 (row->action == W8_ACTION_ATTACK || row->action == W8_ACTION_BERSERK) &&
                 (row->weapon_swap_pending ||
-                 CharacterCanSwitchTo(party_slot, W8_TARGETING_CONTEXT_IN_COMBAT, false, false))) {
+                 !CharacterCanSwitchTo(party_slot, W8_TARGETING_CONTEXT_IN_COMBAT, false, false))) {
                 int group_id = -1;
 
                 if (row->target_in_combat.iMonsterID != -1) {
@@ -2847,8 +2894,11 @@ bool IsMonsterVisibleWithinDistance(W8Monster* monster, const srVector3T<float>*
     srVector3T<double> input;
     srVector3T<float> center;
     srVector3T<float> projected;
+    float distance = monster->GetDistanceToPlayer();
 
-    if (monster->GetDistanceToPlayer() < max_distance) {
+    /* Retail 0x0053A06F: FCOMP + TEST AH,1 (C0) goes on for "less" and for an
+       unordered (NaN) compare; only ordered >= returns false, hence !(>=). */
+    if (!(distance >= max_distance)) {
         monster->GetAnimationBounds(&minimum, &maximum);
         center = monster->movement.position;
         center.y += monster->movement.height_offset;
@@ -3391,8 +3441,13 @@ void ReconcilePartyEquipmentAfterCombat(void)
     for (int party_slot = 0; party_slot < 8; ++party_slot) {
         W8PartySlotRow* row = &g_status.buffers.XChar[party_slot];
         W8Character* character = &g_status.buffers.Char[party_slot];
+        /* Retail 0x0053cd85 compares the condition unsigned (cmp 0xd / jae), so a
+           condition >= 0x80000000 does not count as living (found by the w8diff
+           harness). */
         if (row->fOccupied &&
-            (character->hp_current != 0 || character->highest_condition < W8_CONDITION_TURNCOAT) &&
+            (character->hp_current != 0 ||
+             static_cast<unsigned int>(character->highest_condition) <
+                 static_cast<unsigned int>(W8_CONDITION_TURNCOAT)) &&
             row->weapon_swap_pending && g_settings.autoswap_weapons != 0 &&
             !row->item_action_pending) {
             SwapWeaponSetSlots(party_slot, false, true);

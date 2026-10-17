@@ -29,6 +29,7 @@
 #include "wiz8/local_code/character_events.h"
 #include "wiz8/utility.h"
 #include "wiz8/sr_api.h"
+#include "wiz8/canvas.h"
 #include "input.h"
 #include "timer.h"
 
@@ -533,6 +534,44 @@ void ReleaseDefaultHelpText(void)
     }
 }
 
+/* Wide canvas layout A: the event as an edge-anchored region sees it - the
+   packed cursor x moved into the region's own 640 space (cursor minus the
+   anchor shift). Centered regions, keyboard events and the layout-off case
+   get the original event untouched. `scratch` holds the copy. */
+static const InputAtom* RegionLocalEvent(const InputAtom* event, const W8Region* region,
+                                         InputAtom* scratch)
+{
+    enum { MOUSE_EVENTS = 0x0ff8 }; /* LEFT_BUTTON_DOWN .. MOUSE_WHEEL */
+    int shift = CanvasAnchorShift(region->layout_anchor);
+    if (shift == 0 || (event->usEvent & MOUSE_EVENTS) == 0) {
+        return event;
+    }
+    *scratch = *event;
+    short x = static_cast<short>(event->uiParam & 0xffff);
+    x = static_cast<short>(x - shift);
+    scratch->uiParam = (event->uiParam & 0xffff0000u) | static_cast<unsigned short>(x);
+    return scratch;
+}
+
+/* Call a region's callback with the event in the region's own space. */
+static unsigned char CallRegion(W8Region* region, const InputAtom* event)
+{
+    InputAtom scratch;
+    return region->callback(RegionLocalEvent(event, region, &scratch), region);
+}
+
+void SetRegionLayoutAnchor(unsigned int region_index, int anchor)
+{
+    if (region_index < 1500) {
+        g_regions[region_index].layout_anchor = static_cast<unsigned char>(anchor);
+    }
+}
+
+int GetRegionLayoutAnchor(unsigned int region_index)
+{
+    return region_index < 1500 ? g_regions[region_index].layout_anchor : W8_ANCHOR_CENTER;
+}
+
 static bool FindEnabledRegionAtPoint(unsigned short x, unsigned short y, unsigned int* found_region)
 {
     for (unsigned int set_index = 0; set_index < g_region_set_count; ++set_index) {
@@ -569,7 +608,7 @@ unsigned int UpdateRegionMousePosition(int x, int y)
 
     if (g_captured_region_index != 0) {
         W8Region* forced = &g_regions[g_captured_region_index];
-        forced->callback(&event, forced);
+        CallRegion(forced, &event);
         return g_current_region_index;
     }
 
@@ -581,7 +620,7 @@ unsigned int UpdateRegionMousePosition(int x, int y)
         if (previous_index != 0 && previous_index != region_index) {
             W8Region* previous = &g_regions[previous_index];
             previous->flags = (previous->flags & 0xff0f) | W8_REGION_MOUSE_LEAVE;
-            previous->callback(&event, previous);
+            CallRegion(previous, &event);
             if ((previous->flags & W8_REGION_HELP_SHOWN) != 0) {
                 VideoRemoveToolTip();
                 previous->flags &= ~W8_REGION_HELP_SHOWN;
@@ -595,7 +634,7 @@ unsigned int UpdateRegionMousePosition(int x, int y)
             region->flags |= W8_REGION_MOUSE_ENTER;
             SetRegionHelpText(FormatWideString(L"Region %d", region_index));
         }
-        region->callback(&event, region);
+        CallRegion(region, &event);
         if (g_current_region_index != previous_index) {
             if (region->help_enabled &&
                 (g_settings.tooltips_enabled || g_region_help_force_enabled)) {
@@ -613,7 +652,7 @@ unsigned int UpdateRegionMousePosition(int x, int y)
         unsigned int previous_index = g_hover_region_index;
         W8Region* previous = &g_regions[previous_index];
         previous->flags = (previous->flags & 0xff0f) | W8_REGION_MOUSE_LEAVE;
-        previous->callback(&event, previous);
+        CallRegion(previous, &event);
         if ((previous->flags & W8_REGION_HELP_SHOWN) != 0) {
             VideoRemoveToolTip();
             previous->flags &= ~W8_REGION_HELP_SHOWN;
@@ -649,7 +688,7 @@ unsigned int FindRegionAtPoint(unsigned short x, unsigned short y)
         if (g_hover_region_index != 0 && g_hover_region_index != region_index) {
             W8Region* previous = &g_regions[g_hover_region_index];
             previous->flags = (previous->flags & 0xff0f) | W8_REGION_MOUSE_LEAVE;
-            previous->callback(&event, previous);
+            CallRegion(previous, &event);
             if ((previous->flags & W8_REGION_HELP_SHOWN) != 0) {
                 VideoRemoveToolTip();
                 previous->flags &= ~W8_REGION_HELP_SHOWN;
@@ -743,7 +782,7 @@ dispatch:
     memcpy(&callback_address, &region->callback, sizeof(callback_address));
     RuntimeObserve(RUNTIME_REGION_ACTIVATED, region_index, callback_address, region->callback_id);
 #endif
-    unsigned char handled = region->callback(event, region);
+    unsigned char handled = CallRegion(region, event);
     if (sound_id != -1) {
         PlayButtonSound(sound_id);
     }
@@ -789,11 +828,15 @@ void ShowRegionHelp(unsigned int region_index)
     height = g_help_box_height + W8_HELP_MARGIN;
     SGPMouseGetPos(&anchor);
     anchor.y -= height;
-    if (anchor.x < 0) {
-        anchor.x = W8_HELP_MARGIN;
+    /* Wide canvas layout A: the cursor (and the help box) may be anywhere on
+       the canvas, game x -ox .. 640+ox. Off: retail's 0..640 screen. */
+    int screen_left = CanvasWideLayoutActive() ? -g_canvas_ox : 0;
+    int screen_right = W8_SCREEN_WIDTH + (CanvasWideLayoutActive() ? g_canvas_ox : 0);
+    if (anchor.x < screen_left) {
+        anchor.x = screen_left + W8_HELP_MARGIN;
     }
-    if (anchor.x + width > W8_SCREEN_WIDTH - 1) {
-        anchor.x = W8_SCREEN_WIDTH - width;
+    if (anchor.x + width > screen_right - 1) {
+        anchor.x = screen_right - width;
     }
     if (anchor.y < 0) {
         anchor.y = W8_HELP_MARGIN;
@@ -827,10 +870,16 @@ void ActivateDialogRegion(unsigned int region_index)
         event.uiTimeStamp = GetClock();
         event.usKeyState = gfAltState | gfCtrlState | gfShiftState;
         event.usEvent = MOUSE_POS;
+        /* Retail 0x004f20ac..0x004f20d4: uiParam = live cursor,
+           (gusMouseYPos << 16) | gusMouseXPos; usParam stays unset as in retail. */
+        event.uiParam = (static_cast<unsigned int>(gusMouseYPos) << 16) |
+                        static_cast<unsigned int>(gusMouseXPos);
 
         W8Region* previous = &g_regions[g_hover_region_index];
         previous->flags = (previous->flags & 0xff0f) | W8_REGION_MOUSE_LEAVE;
-        previous->callback(&event, previous);
+        /* Retail calls the callback directly; CallRegion is identical with layout A
+           off and gives region-local x like the other leave paths. */
+        CallRegion(previous, &event);
         unsigned int previous_index = g_hover_region_index;
         if ((g_regions[previous_index].flags & W8_REGION_HELP_SHOWN) != 0) {
             VideoRemoveToolTip();
@@ -978,15 +1027,23 @@ bool RegionContainsPoint(unsigned int region_index, unsigned short x, unsigned s
                      "C:\\Projects\\Wizardry 8\\Local Code\\RegionManager.cpp", 0x2a4, 0);
     }
     region = &g_regions[region_index];
+    /* Wide canvas layout A: the cursor x may lie outside 0..639 (the whole
+       canvas, -ox .. 639+ox, carried as a 16-bit two's complement value), and
+       an edge-anchored region compares in its own 640 space: cursor minus the
+       anchor shift. With the layout off the shift is 0 and x is 0..639, so the
+       signed reading is retail's comparison. */
+    int local_x = static_cast<short>(x) - CanvasAnchorShift(region->layout_anchor);
+    int local_y = static_cast<short>(y);
     switch (region->flags & W8_REGION_MODE_MASK) {
     case W8_REGION_RECTANGLE:
-        if (x >= region->x1 && x <= region->x2 && y >= region->y1 && y <= region->y2) {
+        if (local_x >= region->x1 && local_x <= region->x2 && local_y >= region->y1 &&
+            local_y <= region->y2) {
             return true;
         }
         break;
     case W8_REGION_CIRCLE: {
-        short delta_x = x - region->x1;
-        short delta_y = y - region->y1;
+        short delta_x = static_cast<short>(local_x - region->x1);
+        short delta_y = static_cast<short>(local_y - region->y1);
         if (delta_x * delta_x + delta_y * delta_y <= region->x2 * region->x2) {
             return true;
         }
@@ -1152,7 +1209,7 @@ void ClearHotRegion(void)
         unsigned int mode = region->flags & W8_REGION_MODE_MASK;
         if (mode == 1 || mode == 2) {
             region->flags = (region->flags & 0xff0f) | W8_REGION_MOUSE_LEAVE;
-            region->callback(&event, region);
+            CallRegion(region, &event);
             unsigned int region_index = g_current_region_index;
             if ((g_regions[region_index].flags & W8_REGION_HELP_SHOWN) != 0) {
                 VideoRemoveToolTip();

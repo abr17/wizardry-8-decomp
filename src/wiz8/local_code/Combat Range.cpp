@@ -196,6 +196,7 @@ bool CharacterActionReachesTarget(int party_slot, int hand, W8TargetingContext c
         srVector3T<float> camera;
         srVector3T<float> camera_top;
         srVector3T<float> point;
+        srVector3T<float> trace_point;
         W8TargetSource source;
         float distance;
         bool trace;
@@ -203,6 +204,9 @@ bool CharacterActionReachesTarget(int party_slot, int hand, W8TargetingContext c
         GetCameraPosition(&camera);
         GetCameraPosition(&camera_top);
         point = target->point;
+        /* Retail 0x00519296: the point is copied twice; [esp+0x38] is never lowered
+           and is the end of the line-of-sight trace below. */
+        trace_point = target->point;
         unsigned int spell_id = GetActionSpellLikeId(party_slot, context);
         if (spell_id == W8_SPELL_NONE) {
             srAssertFail("uiSpell != SPELL_NONE", COMBAT_RANGE_CPP, 0xee, 0);
@@ -224,13 +228,15 @@ bool CharacterActionReachesTarget(int party_slot, int hand, W8TargetingContext c
         }
         float dx = point.x - camera.x;
         float dz = point.z - camera.z;
-        if (distance + g_float_one <
-            sqrtf(dx * dx + (point.y - camera.y) * (point.y - camera.y) + dz * dz) -
-                g_startup_world->radius) {
+        /* Retail 0x005193f8: fcompp; test ah,1 -> false on < or unordered (NaN). */
+        if (!(distance + g_float_one >=
+              sqrtf(dx * dx + (point.y - camera.y) * (point.y - camera.y) + dz * dz) -
+                  g_startup_world->radius)) {
             return false;
         }
         if (trace) {
-            return g_octree->TraceLineOfSight(&camera_top, &point, true, -3, -3, true, 0) == 0;
+            /* Retail 0x0051940f: trace from the unlowered camera to the unlowered point. */
+            return g_octree->TraceLineOfSight(&camera_top, &trace_point, true, -3, -3, true, 0) == 0;
         }
     } else if (target->iType == W8_TARGET_KIND_GROUP) {
         unsigned int group_list_index =
@@ -1093,9 +1099,14 @@ float MonsterChooseTarget(W8MonsterInfo* monster_info, W8CombatSlot* out, int ki
 
     out->iType = W8_TARGET_KIND_NONE;
     if (monster_info->ubDisposition == W8_DISPOSITION_HOSTILE &&
-        IsVisibleUnderConditions(monster_info, &monster_info->player_visibility, kind) &&
-        (best = monster_info->p3D->GetDistanceToPlayer(), best < 999999.0f)) {
-        out->iType = W8_TARGET_KIND_CHARACTER;
+        IsVisibleUnderConditions(monster_info, &monster_info->player_visibility, kind)) {
+        float distance = monster_info->p3D->GetDistanceToPlayer();
+        /* Retail 0x0051ac70: fcom/test ah,1 takes the player when distance < 999999
+           or unordered (NaN); only then is best overwritten and the kind set to 2 (PARTY). */
+        if (!(distance >= 999999.0f)) {
+            best = distance;
+            out->iType = W8_TARGET_KIND_PARTY;
+        }
     }
     if (out->iType == W8_TARGET_KIND_NONE || !monster_info->pCombat->reconsider_action) {
         unsigned int count = PLLength(gXStatus.plsMonsterList);
@@ -1109,7 +1120,8 @@ float MonsterChooseTarget(W8MonsterInfo* monster_info, W8CombatSlot* out, int ki
                 W8VisibilityRecord* row = FindMonToMonVisibility(monster_info, other);
                 if (IsVisibleUnderConditions(monster_info, row, kind)) {
                     float distance = monster_info->p3D->GetDistanceToMonster(other->p3D);
-                    if (distance < best) {
+                    /* Retail 0x0051ad15: fcom [best]; test ah,1 -> taken on < or unordered (NaN). */
+                    if (!(distance >= best)) {
                         out->iType = W8_TARGET_KIND_MONSTER;
                         out->iMonsterID = other->location_id;
                         best = distance;

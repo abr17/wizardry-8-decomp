@@ -369,6 +369,8 @@ void UseHeldItemOnItem(W8ItemInstance* item)
         if (CanItemLeaveItsSlot(item)) {
             ResetCombatSlot(&target);
             target.iType = W8_TARGET_KIND_ITEM;
+            /* Retail 0x005BA7FA: also stores the item in target+0x1c (pPCItem) before the cast. */
+            target.pPCItem = item;
             if (CommitPartySlotSpell(giCasterCharSlot, W8_SPELL_IDENTIFY_ITEM, 8, &target) == 1) {
                 OpenItemInfoDialog(item, 0);
                 if (!item->identified) {

@@ -77,6 +77,12 @@ unsigned char ShowTargetMarker(const srVector3T<float>* eye, const srVector3T<fl
 void WorldUpdateLights(W8World* world);
 float WorldGetRenderRange(W8World* world);
 double WorldGetFarClip(W8World* world);
+/* Mod (draw distance): WorldGetFarClip - the gameplay distance (sight, AI,
+   group loading); WorldGetRenderFarClip - the camera far plane =
+   gameplay distance x WorldGetRenderFarScale (wiz8wide.ini [Display] ViewDistance; 1 for
+   the sky world). Rendering (fog, depth cue, octree) reads only the latter. */
+double WorldGetRenderFarScale(W8World* world);
+double WorldGetRenderFarClip(W8World* world);
 void WorldSetFarClip(W8World* world, float distance);
 void WorldSetRenderRange(W8World* world, float value);
 stLight* CreateLight(srNode* parent, const char* name);

@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include <windows.h>
 #include "wiz8/fonts.h"
 #include <stdio.h>
@@ -268,14 +269,14 @@ void DispatchMGSCommand(W8MGSCommand command)
             if (gXStatus.fCombatMode) {
                 ToggleCombatMode();
                 if (!gXStatus.fCombatMode) {
-                    InvalidateRegion(0xa8, 0x16e, 0x1c4, 0x1ba, 0);
+                    InvalidateRegion(MainGameWideLeft(0xa8), 0x16e, MainGameWideRight(0x1c4), 0x1ba, 0); /* layout A: wide log */
                     return;
                 }
             }
             ClearRecordModeValue();
             ShowMainGameNoticeLine(gppStringList[0x779], OnLeaveGameConfirmClosed, true, true);
         }
-        InvalidateRegion(0xa8, 0x16e, 0x1c4, 0x1ba, 0);
+        InvalidateRegion(MainGameWideLeft(0xa8), 0x16e, MainGameWideRight(0x1c4), 0x1ba, 0); /* layout A: wide log */
         break;
     case W8_MGS_COMMAND_QUIT_GAME:
         ShowMainGameNoticeLine(gppStringList[0x832], OnQuitGameDialogClosed, true, true);
@@ -722,6 +723,8 @@ void CloseKeyboardMenu(void)
     RegionSetDisable(0x26);
     DisableRegionSetInput(0x26);
     if (g_level_block->portrait_refresh_pending[g_selected_party_slot] == 0) {
+        /* Wide canvas layout A: the menu sat over the slot's portrait column. */
+        CanvasDrawScope layout_scope(g_keyboard_menu_panel->m_layoutAnchor);
         ClearSurfaceRect(g_keyboard_menu_panel->m_bounds.left, g_keyboard_menu_panel->m_bounds.top,
                          g_keyboard_menu_panel->m_bounds.left + 0x52,
                          g_keyboard_menu_panel->m_bounds.top + 0x4a);
@@ -789,6 +792,10 @@ unsigned char BuildKeyboardMenu(void)
     g_keyboard_menu_rows[row]->m_secondaryActivationCallback = CloseKeyboardMenu;
     SetRegionHelp(row + 0xb4, true, 0x11);
     g_keyboard_menu_panel->SetEnabled(true);
+    /* Wide canvas layout A: the menu opens over the slot's portrait, so it
+       (and its mouse regions) follows that column to the canvas edge. */
+    g_keyboard_menu_panel->SetLayoutAnchor(CanvasPartySlotAnchor(g_selected_party_slot));
+    SetRegionLayoutAnchor(0xc1, CanvasPartySlotAnchor(g_selected_party_slot));
     RefreshKeyboardMenuRows();
     return 1;
 }
@@ -808,9 +815,10 @@ void EnableKeyboardMenuInput(void)
 // FUNCTION: WIZ8 0x00593300
 bool KeyboardMenuContainsCursor(void)
 {
-    return IsCursorInRectangle(
-        g_keyboard_menu_panel->m_bounds.left, g_keyboard_menu_panel->m_bounds.top,
-        g_keyboard_menu_panel->m_bounds.left + 0x52, g_keyboard_menu_panel->m_bounds.top + 0x4a);
+    return IsCursorInAnchoredRectangle( /* layout A: menu is in its column's 640 space */
+        g_keyboard_menu_panel->m_layoutAnchor, g_keyboard_menu_panel->m_bounds.left,
+        g_keyboard_menu_panel->m_bounds.top, g_keyboard_menu_panel->m_bounds.left + 0x52,
+        g_keyboard_menu_panel->m_bounds.top + 0x4a);
 }
 
 // FUNCTION: WIZ8 0x00593360
@@ -1010,6 +1018,8 @@ static void KeyboardMenuOpenSpellView(void)
     }
 }
 
+bool PartySlotSpellTargetStillValid(int party_slot); /* Magic.cpp, 0x00501530 */
+
 // FUNCTION: WIZ8 0x00594180
 static void KeyboardMenuCastRecordedSpell(void)
 {
@@ -1018,7 +1028,24 @@ static void KeyboardMenuCastRecordedSpell(void)
     if (CanPartySlotCastRecordedSpell(g_selected_party_slot)) {
         StartCharacterSpellCast(g_selected_party_slot, 0);
         RequestRedraw(W8_MAIN_REDRAW_CHARACTER_ACTION);
+        return;
     }
+    /* Retail 0x5942d5..0x594387: the recorded power is not affordable - cast at
+       the highest affordable level (notice 0x7a3), or open the spellbook at it
+       when the target is gone, or just open the spellbook. */
+    int level = GetAffordableSpellPowerLevel(g_selected_party_slot);
+    if (level != 0) {
+        if (PartySlotSpellTargetStillValid(g_selected_party_slot)) {
+            StartCharacterSpellCast(g_selected_party_slot, level);
+            PostCharacterNotice(g_selected_party_slot, FormatWideString(gppStringList[0x7a3], level));
+        } else {
+            OpenSpellCastingView(g_selected_party_slot);
+            SelectSpellPowerLevel(level - 1);
+        }
+    } else if (!gXStatus.fSpellCastMode) {
+        OpenSpellCastingView(g_selected_party_slot);
+    }
+    RequestRedraw(W8_MAIN_REDRAW_CHARACTER_ACTION);
 }
 
 // FUNCTION: WIZ8 0x00594390

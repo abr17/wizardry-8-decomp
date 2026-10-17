@@ -69,6 +69,13 @@ void ClearTextLineEntry(int index);
 void FormatNotice(int channel, short text_box, const wchar_t* format, ...);
 
 void ReleaseMessageStorage(void);
+/* Mod (wide canvas, 2026-10-12): log lines are stored already cut to the
+   text window width at the time of writing (and saved to the save game that way). After
+   a width change (a save from 4:3, a wider log in layout A) old messages
+   wrap too early. Join the lines that were cut by wrapping and cut them
+   again to the current text window width. Called on entering the main screen,
+   after the text window bounds and its font are set. */
+void ReflowMessageStorage(void);
 /* The TEXT section pair - the four message-storage
    runs persisted around the game-status record. */
 unsigned char SaveTextBoxState(unsigned int file);

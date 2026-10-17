@@ -242,7 +242,9 @@ unsigned char PopulateNpcStock(W8NpcState* npc)
     unsigned int remaining;
     int item_id;
     char persistent;
-    char added;
+    /* Retail 0x0055a74e: byte counter is zero-extended (and eax,0xff) before being
+       passed as AddNpcItem's quantity, so it must be unsigned (128..255 stays positive). */
+    unsigned char added;
     char chance;
     char tier;
 
@@ -282,7 +284,7 @@ unsigned char PopulateNpcStock(W8NpcState* npc)
                 } while (remaining != 0);
             }
             if (added != 0) {
-                AddNpcItem(npc, rule->item_id, added);
+                AddNpcItem(npc, rule->item_id, static_cast<unsigned int>(added));
             }
         }
     }
@@ -733,8 +735,9 @@ int CalculateNpcTradeStackPrice(W8NpcState* npc, int item_id, W8TradePriceKind p
 }
 
 /* The bargained price of one offered stack: the party's best communication
-   skill (0x16) builds a 0.2%-per-point adjustment, halved once it would move
-   the price further than half the record's buy/sell spread, then applied to
+   skill (0x16) builds a 0.2%-per-point adjustment, capped at half the
+   record's buy/sell spread (so the two prices meet at most in the middle and
+   selling never pays more than buying costs), then applied to
    the low factor when the NPC buys (mode 0) or against the high factor when
    the party buys (mode 1). Stackable non-armour bundles price per unit times
    the count, everything else prices the whole stack value, unidentified
@@ -745,26 +748,39 @@ int CalculateTradeStackPrice(W8NpcState* npc, W8ItemInstance* item, char price_k
     int stack_value = GetItemStackValue(item);
     unsigned int skill = GetBestPartySkillLevel(W8_SKILL_COMMUNICATION, 0);
     W8NpcDatabaseRecord* record = npc->record;
-    float scale = skill * 0.002f;
-    if (scale > fabs(record->sell_price_factor - record->buy_price_factor) * 0.5) {
-        scale *= 0.5f;
+    /* Retail 0x0055b60f..0x0055b61c: fild qword (the unsigned skill) * 0.002f on the
+       x87 stack, then fstp to a float. */
+    float scale = static_cast<float>(static_cast<double>(skill) * 0.002f);
+    double spread = fabs(static_cast<double>(record->sell_price_factor) - record->buy_price_factor);
+    if (scale > spread * 0.5) {
+        scale = static_cast<float>(spread * 0.5f);
     }
-    float price;
+    /* Retail 0x0055b659..0x0055b6e5 (found by the w8diff harness): the price is
+       never stored, it stays on the x87 stack in double precision; the <= 0 test
+       is fcom / test ah,0x41, so a NaN price also becomes 0.1f; the unit value is
+       loaded with fild qword (unsigned), the stack value with fild dword (signed),
+       and _ftol truncates to 64 bits and keeps the low dword (0 when out of range
+       or NaN), where a plain int cast would give 0x80000000. */
+    double price;
     if (price_kind != W8_TRADE_PRICE_PARTY_SELLS) {
-        price = record->sell_price_factor - scale;
+        price = static_cast<double>(record->sell_price_factor) - scale;
     } else {
-        price = record->buy_price_factor + scale;
+        price = static_cast<double>(record->buy_price_factor) + scale;
     }
-    if (price <= 0.0f) {
+    if (!(price > 0.0)) {
         price = 0.1f;
     }
     W8ItemDatabaseRecord* info = &g_item_records[item->iItemNo];
     int amount;
     if (info->quantity_kind == W8_ITEM_QUANTITY_STACK && item->stack_count > 1 &&
         info->equip_class != W8_ITEM_EQUIP_CLASS_AMMUNITION) {
-        amount = static_cast<int>(price * info->value) * item->stack_count;
+        unsigned int unit_price = static_cast<unsigned int>(
+            static_cast<long long>(static_cast<double>(info->value) * price));
+
+        amount = static_cast<int>(unit_price * item->stack_count);
     } else {
-        amount = static_cast<int>(price * stack_value);
+        amount = static_cast<int>(static_cast<unsigned int>(
+            static_cast<long long>(static_cast<double>(stack_value) * price)));
     }
     if (!item->identified) {
         amount /= 4;

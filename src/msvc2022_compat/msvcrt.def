@@ -1,0 +1,6 @@
+; msvc2022 port: descriptor-only import library for msvcrt.dll. The imports
+; themselves are private-name aliases from tools/msvc2022/make_import_aliases.py
+; (see cmake/ModernMsvc.cmake); LIB merges them in front of this descriptor.
+LIBRARY msvcrt.dll
+EXPORTS
+

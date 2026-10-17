@@ -1,4 +1,5 @@
 #include "wiz8/engine_code/AnimRep.hpp"
+#include "wiz8/russian_text.h"
 #include "wiz8/conditions.h"
 #include "wiz8/monster_cycles.h"
 #include "wiz8/spell_ids.h"
@@ -87,6 +88,7 @@
 #include "wiz8/character_event_queue.h"
 #include "wiz8/local_screens/ReviewCharacterScreen.h"
 #include "wiz8/cursor.h"
+#include "wiz8/canvas.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -691,10 +693,13 @@ int IsPartyEngaged(void)
         return 1;
     }
     if (g_combat_state->uiCurrentPartyAction == W8_PARTY_ACTION_NONE) {
+        /* Retail 0x004e7eb2 compares the condition unsigned (jae), so an
+           out-of-range value is not awake (found by the w8diff harness). */
         for (party_slot = 0; party_slot < 8; ++party_slot) {
             if (g_status.buffers.XChar[party_slot].fOccupied &&
                 g_status.buffers.Char[party_slot].hp_current != 0 &&
-                g_status.buffers.Char[party_slot].highest_condition < W8_CONDITION_ASLEEP &&
+                static_cast<unsigned int>(g_status.buffers.Char[party_slot].highest_condition) <
+                    W8_CONDITION_ASLEEP &&
                 g_combat_state->characters[party_slot].dead) {
                 return 1;
             }
@@ -951,7 +956,12 @@ void EndMonsterTurn(W8MonsterInfo* monster_info)
 void SetUpMonsterTurn(W8MonsterInfo* monster_info)
 {
     unsigned int speed = 100;
-    float scale;
+    /* Retail 0x004eb92d multiplies the exact unsigned speed (fild qword) by the
+       range still on the x87 stack, so the product is formed in double and only
+       the argument is rounded (found by the w8diff harness). Retail
+       GetMonsterCombatMoveRange (0x004e5a34) returns that range unrounded too,
+       hence its double return. */
+    double scale;
 
     if (monster_info->pCombat->turn_started) {
         monster_info->p3D->movement_complete = false;
@@ -974,7 +984,8 @@ void SetUpMonsterTurn(W8MonsterInfo* monster_info)
         }
     }
 
-    monster_info->p3D->SetMonsterTurnSpeed(speed * scale * g_movement_speed_step);
+    monster_info->p3D->SetMonsterTurnSpeed(
+        static_cast<float>(speed * scale * g_movement_speed_step));
     /* Four bytes inside cycle eight's block, cleared together. */
     monster_info->p3D->movement.callback_progress = 0.0f;
     monster_info->pCombat->turn_started = true;
@@ -1134,8 +1145,20 @@ void EndCombat(bool forced_cleanup)
     DisableMainRegionSet();
     if (g_current_screen_state.id == W8_SCREEN_MAIN_GAME &&
         !g_level_block->review_transition_active) {
-        ClearSurfaceRect(0x17, 0x34, 0x2d, 0x159);
-        ClearSurfaceRect(0x253, 0x34, 0x269, 0x159);
+        /* The combat mini-portraits are drawn per portrait column (layout A:
+           LEFT/RIGHT canvas edge, RedrawCombatPortraits), so clear them in the
+           same column scopes. Without the layout the scopes shift nothing and
+           this is the retail pair of clears (plus an explicit invalidate). */
+        {
+            CanvasDrawScope left_scope(W8_ANCHOR_LEFT);
+            ClearSurfaceRect(0x17, 0x34, 0x2d, 0x159);
+            InvalidateRegion(0x17, 0x34, 0x2d, 0x159, 0);
+        }
+        {
+            CanvasDrawScope right_scope(W8_ANCHOR_RIGHT);
+            ClearSurfaceRect(0x253, 0x34, 0x269, 0x159);
+            InvalidateRegion(0x253, 0x34, 0x269, 0x159, 0);
+        }
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_0 | W8_MAIN_REDRAW_PORTRAIT_1 |
                       W8_MAIN_REDRAW_PORTRAIT_2 | W8_MAIN_REDRAW_PORTRAIT_3 |
                       W8_MAIN_REDRAW_PORTRAIT_4 | W8_MAIN_REDRAW_PORTRAIT_5 |
@@ -2011,7 +2034,8 @@ int CheckCombatEnd(unsigned int end_if_no_hostiles)
             ShowNotice(W8_FONT_PALETTE_BEIGE, gppStringList[0x22c], 0);
             FormatNotice(W8_FONT_PALETTE_BEIGE, 0, gppStringList[0x22d],
                          g_combat_state->combat_result,
-                         g_combat_state->combat_result == 1 ? L"kill" : L"kills");
+                         g_combat_state->combat_result == 1 ? RussianOr(L"kill", L"уб.")
+                                                            : RussianOr(L"kills", L"уб."));
             StartMusicResource("CombatWin.MPL", 0, 1);
             ServiceMusicPlaylist();
             StartLevelMusic(1, 0);
@@ -2878,18 +2902,18 @@ void StepMonsterCombatAction(W8MonsterInfo* monster_info)
         RefreshAllSight();
         monster = monster_info->p3D;
         combat = monster_info->pCombat;
-        if (static_cast<int>(
-                (monster->movement.callback_threshold <= g_float_zero
-                     ? monster->movement.callback_progress / monster->movement.callback_threshold
-                     : g_float_zero) *
-                g_octree_cell_scale) < 100) {
-            progress_pct = static_cast<int>(
-                (monster->movement.callback_threshold <= g_float_zero
-                     ? monster->movement.callback_progress / monster->movement.callback_threshold
-                     : g_float_zero) *
-                g_octree_cell_scale);
-        } else {
-            progress_pct = 100;
+        /* Retail 0x004EB659..0x004EB66D: fcomp 0.0; test ah,0x41; jne -> 0.0, so only
+           threshold > 0 divides (threshold <= 0 or NaN gives zero, written so NaN fails). */
+        {
+            float moved_fraction =
+                monster->movement.callback_threshold > g_float_zero
+                    ? monster->movement.callback_progress / monster->movement.callback_threshold
+                    : g_float_zero;
+            /* Retail 0x004EB689..0x004EB691: __ftol(x * 100.0f), then CMP EAX,100 / JAE
+               (unsigned: a negative result also clamps to 100). */
+            unsigned int scaled_pct =
+                static_cast<unsigned int>(static_cast<int>(moved_fraction * g_octree_cell_scale));
+            progress_pct = scaled_pct < 100u ? static_cast<int>(scaled_pct) : 100;
         }
         if (static_cast<int>(Random(100)) < 100 - progress_pct) {
             if (monster_info->action_kind != W8_MONSTER_ACTION_CONTROLLED_MOVE) {

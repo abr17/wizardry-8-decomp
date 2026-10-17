@@ -1,5 +1,6 @@
 
 
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/local_screens/MGSPortraitCombat.h"
 
 #include "wiz8/layouts/character.h"
@@ -163,6 +164,8 @@ unsigned char CreateSubMenuButtons(void)
         g_submenu_buttons[index]->SetPosition(g_submenu_button_positions[index].x,
                                               g_submenu_button_positions[index].y);
         g_submenu_buttons[index]->m_owner = 0;
+        /* Wide canvas layout A: the action buttons are the bottom bar's left part. */
+        g_submenu_buttons[index]->SetLayoutAnchor(W8_ANCHOR_LEFT);
     }
     return 1;
 }

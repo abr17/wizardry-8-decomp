@@ -199,6 +199,23 @@
 #error MSS.H did not detect your platform.  Define __DOS__, _WINDOWS, WIN32, or macintosh.
 #endif
 
+/* msvc2022 port: modern Windows SDK headers static_assert on non-default
+   packing, so bring them in before Miles switches to pack(1). mmsystem.h is
+   byte-packed internally, so PCMWAVEFORMAT keeps the original MSS.H layout. */
+#if defined(_MSC_VER) && _MSC_VER >= 1900 && !defined(__clang__) && defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef WIN32_EXTRA_LEAN
+#define WIN32_EXTRA_LEAN
+#endif
+#ifndef STRICT
+#define STRICT
+#endif
+#include <windows.h>
+#include <mmsystem.h>
+#endif
+
 #if defined(_PUSHPOP_SUPPORTED) || PRAGMA_STRUCT_PACKPUSH
 #pragma pack(push, 1)
 #else

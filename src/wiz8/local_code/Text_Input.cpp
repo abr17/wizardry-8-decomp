@@ -883,6 +883,27 @@ static unsigned char FindTextInputMousePosition(TEXTINPUTNODE* field, unsigned c
     return position;
 }
 
+/* Wide canvas layout A (2026-10-12): mouse x as the text field sees it
+   in its own 640 coordinates. A field in a panel anchored to a canvas edge (NPC
+   conversation keyword input) stores the anchor in its mouse region
+   (MOUSE_REGION::bLayoutAnchor) - SGP uses it for hit-testing, and the caret
+   position is computed from the same x. With no anchor or outside the layout the shift is 0, and
+   reading it as signed short for x 0..639 gives the same as the original. */
+static int FieldMouseX(const TEXTINPUTNODE* field)
+{
+    return static_cast<short>(gusMouseXPos) - CanvasAnchorShift(field->region.bLayoutAnchor);
+}
+
+void SetTextInputFieldLayoutAnchor(unsigned char field_id, int anchor)
+{
+    for (TEXTINPUTNODE* field = gpTextInputHead; field != 0; field = field->next) {
+        if (field->ubID == field_id) {
+            field->region.bLayoutAnchor = static_cast<INT8>(anchor);
+            return;
+        }
+    }
+}
+
 // FUNCTION: WIZ8 0x005D4CB0
 void MouseMovedInTextRegionCallback(MOUSE_REGION* region, int reason)
 {
@@ -928,7 +949,7 @@ void MouseMovedInTextRegionCallback(MOUSE_REGION* region, int reason)
         return;
 
     unsigned char position = gubParkingPos;
-    int mouse_offset = gusMouseXPos - current_field->region.RegionTopLeftX;
+    int mouse_offset = FieldMouseX(current_field) - current_field->region.RegionTopLeftX;
     position = FindTextInputMousePosition(current_field, position, mouse_offset);
 
     if (position == gubMouseDownPos) {
@@ -976,22 +997,11 @@ void MouseClickedInTextRegionCallback(MOUSE_REGION* region, int reason)
         if (field->szString == 0) {
             position = 0;
         } else {
-            int mouse_offset = gusMouseXPos - field->region.RegionTopLeftX;
-            unsigned int start = gubParkingPos;
-            short width = StringPixLengthArg(pColors->usFont, 1, field->szString + start);
-            if ((width / 2) / 2 < mouse_offset) {
-                int count = 1;
-                int previous_width = width / 2;
-                do {
-                    position = static_cast<unsigned char>(position + 1);
-                    ++count;
-                    width = StringPixLengthArg(pColors->usFont, count, field->szString + start);
-                    int midpoint = (width - previous_width) / 2 + previous_width;
-                    previous_width = width;
-                    if (field->ubStrLen <= position || mouse_offset <= midpoint)
-                        break;
-                } while (true);
-            }
+            /* Retail 0x5d4fef: the length test comes BEFORE the increment (as in
+               FindTextInputMousePosition). The inlined copy incremented first, so a
+               click into an empty field put the caret at 1, past the terminator. */
+            int mouse_offset = FieldMouseX(field) - field->region.RegionTopLeftX;
+            position = FindTextInputMousePosition(field, position, mouse_offset);
         }
         SetTextInputCursor(position);
         gubMouseDownPos = gubCursorPos;
@@ -1050,7 +1060,7 @@ void MouseClickedInTextRegionCallback(MOUSE_REGION* region, int reason)
             position = 0;
         } else {
             TEXTINPUTNODE* field = gpActive;
-            int mouse_offset = gusMouseXPos - field->region.RegionTopLeftX;
+            int mouse_offset = FieldMouseX(field) - field->region.RegionTopLeftX;
             position = FindTextInputMousePosition(field, position, mouse_offset);
         }
         if (position == gubMouseDownPos)
@@ -1067,6 +1077,8 @@ void RenderBackgroundField(TEXTINPUTNODE* field)
     int top = field->region.RegionTopLeftY;
     int right = field->region.RegionBottomRightX;
     int bottom = field->region.RegionBottomRightY;
+    /* Layout A: the field is drawn at the canvas edge it is anchored to. */
+    CanvasDrawScope layout_scope(field->region.bLayoutAnchor);
 
     if (style->fBevelling) {
         ColorFillVideoSurfaceArea(FRAME_BUFFER, left, top, right, bottom, style->usDarkerColor);
@@ -1092,9 +1104,11 @@ void RenderActiveTextField(void)
     TEXTINPUTNODE* field = gpActive;
     if (field == 0 || field->szString == 0)
         return;
+    /* Layout A: the field is drawn at the canvas edge it is anchored to. */
+    CanvasDrawScope layout_scope(field->region.bLayoutAnchor);
 
     if (gfLeftButtonState != 0) {
-        if (static_cast<int>(gusMouseXPos) < field->region.RegionTopLeftX) {
+        if (FieldMouseX(field) < field->region.RegionTopLeftX) {
             if (gubCursorPos != 0) {
                 --gubCursorPos;
                 gubParkingPos = CalculateCursorPos(
@@ -1103,7 +1117,7 @@ void RenderActiveTextField(void)
             }
             if (gfHiliteMode)
                 gubStartHilite = gubVisibleStart;
-        } else if (field->region.RegionBottomRightX < static_cast<int>(gusMouseXPos)) {
+        } else if (field->region.RegionBottomRightX < FieldMouseX(field)) {
             if (gubCursorPos < field->ubStrLen) {
                 ++gubCursorPos;
                 gubParkingPos = CalculateCursorPos(
@@ -1180,6 +1194,8 @@ void RenderInactiveTextFieldNode(TEXTINPUTNODE* field)
 {
     if (field == 0 || field->szString == 0)
         return;
+    /* Layout A: the field is drawn at the canvas edge it is anchored to. */
+    CanvasDrawScope layout_scope(field->region.bLayoutAnchor);
 
     SaveFontSettings();
     SetFont(pColors->usFont);
@@ -1335,7 +1351,7 @@ void SelectAllText(void)
     if (field->szString == 0) {
         position = 0;
     } else {
-        int mouse_offset = gusMouseXPos - field->region.RegionTopLeftX;
+        int mouse_offset = FieldMouseX(field) - field->region.RegionTopLeftX;
         position = FindTextInputMousePosition(field, position, mouse_offset);
     }
 

@@ -694,7 +694,9 @@ W8GDSurface* W8GameData::ProbePropsAlongMotion(srVector3T<float>* direction,
             level->flags |= W8_LEVEL_FLAG_PROP_CONTACT;
             level->contact_motion = projected;
             level->residual_contact_length = residual_length;
-            *direction += along_normal - residual;
+            /* Retail 0x0041BC48: operator-(&tmp, &residual, &old contact_displacement) then
+               direction += tmp; only the change in the prop push is added. */
+            *direction += residual - level->contact_displacement;
             level->contact_displacement = residual;
             level->contact_velocity = residual / static_cast<double>(level->camera_scale);
         }
@@ -1969,7 +1971,9 @@ bool W8GDSurface::ResolveCollision(srVector3T<float>* origin, const srVector3T<f
                     direction->SetZero();
                     return false;
                 }
-                if (ahead_b <= ahead_a) {
+                /* Retail 0x0041E5F2: fcomp ahead_a,ahead_b; test ah,0x41; jne -> crease_b and
+                   replace the first plane when ahead_a <= ahead_b or NaN. */
+                if (!(ahead_a > ahead_b)) {
                     float crease_sq = crease_b.LengthSquared();
                     if (crease_sq > g_vector_length_squared_epsilon) {
                         slide = crease_b * (DotProduct(slide, crease_b) / crease_sq);
@@ -2271,10 +2275,12 @@ bool HasLevelDataVector(void)
     if (g_level_data == 0) {
         return false;
     }
+    /* Retail 0x0041F01F: fcomp 0.0; test ah,0x40 per component - a NaN (unordered)
+       component counts as zero, hence not written as != 0. */
     if ((g_level_data->flags & W8_LEVEL_FLAG_PROP_CONTACT) != 0 &&
-        (g_level_data->contact_motion.x != g_float_zero ||
-         g_level_data->contact_motion.y != g_float_zero ||
-         g_level_data->contact_motion.z != g_float_zero)) {
+        (g_level_data->contact_motion.x < g_float_zero || g_level_data->contact_motion.x > g_float_zero ||
+         g_level_data->contact_motion.y < g_float_zero || g_level_data->contact_motion.y > g_float_zero ||
+         g_level_data->contact_motion.z < g_float_zero || g_level_data->contact_motion.z > g_float_zero)) {
         return true;
     }
     return false;
@@ -2623,7 +2629,10 @@ bool HasCameraLineOfSight(const srVector3T<float>* position)
 void PlacePartyAtPoint(const srVector3T<float>* point)
 {
     srVector3T<float> delta = *point - g_world_origin;
-    if (sqrtf(DotProduct(delta, delta)) != g_double_zero) {
+    float length = sqrtf(DotProduct(delta, delta));
+    /* Retail 0x004210C7: fcomp 0.0; test ah,0x40 skips on equal OR unordered (NaN);
+       a sqrt is never negative, so "ordered and != 0" is "> 0". */
+    if (length > g_double_zero) {
         MarkRendererReady();
         g_gd_camera->m_position = *point;
     }
@@ -2691,8 +2700,10 @@ bool W8LevelDataRecord::IntegrateCameraForward()
         adjustment -= camera_motion_velocity;
         delta_length = adjustment.Length();
         limit = g_environ->motion_factor * limit;
-        if (delta_length <= limit) {
-            if (delta_length < limit * g_camera_snap_epsilon) {
+        /* Retail 0x0042068F: test ah,0x41 -> snap path on <=, == or unordered; 0x004207CC:
+           test ah,1 -> zero on < or unordered, so a NaN delta zeroes the adjustment. */
+        if (!(delta_length > limit)) {
+            if (!(delta_length >= limit * g_camera_snap_epsilon)) {
                 adjustment.SetZero();
             }
         } else {
@@ -2701,7 +2712,8 @@ bool W8LevelDataRecord::IntegrateCameraForward()
         scale = g_environ->momentum_scale * g_environ->motion_factor;
         integrated_motion *= scale;
     } else {
-        if (forward_length < limit) {
+        /* Retail 0x004204EC: fcomp limit; test ah,1 -> NaN also zeroes and returns false. */
+        if (!(forward_length >= limit)) {
             motion_velocity.SetZero();
             return false;
         }
@@ -2924,7 +2936,8 @@ void W8LevelDataRecord::UpdateMotionProgress(unsigned char fast_move, unsigned c
 
     motion_velocity = motion_displacement * (static_cast<float>(g_double_one) / camera_scale);
     speed = motion_displacement.Length();
-    if (speed < g_camera_transition_epsilon) {
+    /* Retail 0x00420342: fcomp eps; test ah,1 -> a NaN speed resets too. */
+    if (!(speed >= g_camera_transition_epsilon)) {
         speed = 0;
         motion_displacement.SetZero();
         motion_velocity.SetZero();
@@ -2956,7 +2969,8 @@ void W8LevelDataRecord::UpdateMotionProgress(unsigned char fast_move, unsigned c
 
     if (!g_camera_sway_active) {
         if (!g_level_override) {
-            if (allow_override && vertical_motion < g_float_one_tenth) {
+            /* Retail 0x004203FD: fcomp 0.1; test ah,1 -> NaN sets the override too. */
+            if (allow_override && !(vertical_motion >= g_float_one_tenth)) {
                 g_level_override = true;
             }
         } else if (allow_override && g_float_thirty_five_hundredths < vertical_motion) {
@@ -2978,9 +2992,11 @@ void UpdateLevelMovementAudio(void)
     }
     if ((g_gd_camera->m_orientation_flags & W8_CAMERA_YAW_MOVING) == 0 ||
         (g_level_data->flags & W8_LEVEL_FLAG_WALKABLE_CONTACT) == 0 ||
-        g_level_data->motion_velocity.x != g_float_zero ||
-        g_level_data->motion_velocity.y != g_float_zero ||
-        g_level_data->motion_velocity.z != g_float_zero) {
+        /* Retail 0x00420E6B: fcomp 0.0; test ah,0x40; je stop per component - a NaN
+           (unordered) component counts as zero, hence not written as != 0. */
+        g_level_data->motion_velocity.x < g_float_zero || g_level_data->motion_velocity.x > g_float_zero ||
+        g_level_data->motion_velocity.y < g_float_zero || g_level_data->motion_velocity.y > g_float_zero ||
+        g_level_data->motion_velocity.z < g_float_zero || g_level_data->motion_velocity.z > g_float_zero) {
         if (g_level_footstep_sound != -1) {
             SoundSetFadeVolume(g_level_footstep_sound, 0, 500, 1);
             g_level_footstep_sound = -1;

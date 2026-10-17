@@ -201,7 +201,8 @@ void W8Octree::UpdateCameraVisibility()
         return;
     }
 
-    view.far_clip = static_cast<float>(WorldGetFarClip(world));
+    /* Mod: visibility by the render far plane (3d.h WorldGetRenderFarClip). */
+    view.far_clip = static_cast<float>(WorldGetRenderFarClip(world));
     world->camera->getLocation(view.camera_location);
     view.horizontal_fov = static_cast<float>(world->camera->getHorizontalFOV());
     view.vertical_fov = static_cast<float>(world->camera->getVerticalFOV());

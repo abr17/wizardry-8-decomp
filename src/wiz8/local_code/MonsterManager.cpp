@@ -300,7 +300,9 @@ void ActivateMonster(W8MonsterInfo* monster_info, W8MonsterActivationMode mode)
         MonsterSetCycle(monster_info->p3D, 1);
     }
 
-    if (monster_info->scale < g_float_zero ||
+    /* Retail 0x004E41D8..0x004E41ED: FCOMP + TEST AH,1 recomputes when C0 is
+       set - for a negative scale and for an unordered (NaN) one. */
+    if (!(monster_info->scale >= g_float_zero) ||
         g_status.level_progress[g_status.current_level].visited == 0) {
         monster_info->saved_mirror_x = MonsterGetMirrorX(monster_info->p3D);
         monster_info->scale = CalculateMonsterScale(monster_info);
@@ -615,12 +617,14 @@ W8Monster* GetMonsterByLocationID(int location_id)
 }
 
 /* Scale the monster database's combat movement range by the shared factor at
-   0x005ED4F0 before range/path consumers use it. */
+   0x005ED4F0 before range/path consumers use it. Retail 0x004e5a34 returns the
+   product unrounded on the x87 stack, so it is a double here (found by the
+   w8diff harness: SetUpMonsterTurn speeds were 1 ULP off). */
 // FUNCTION: WIZ8 0x004e5990
-float GetMonsterCombatMoveRange(W8MonsterInfo* monster_info)
+double GetMonsterCombatMoveRange(W8MonsterInfo* monster_info)
 {
     W8MonsterRecord* record;
-    float result;
+    double result;
 
     if (monster_info == 0) {
         srAssertFail("pMonsterInfo != NULL", MONSTER_MANAGER_CPP, 0x5e9, 0);
@@ -629,7 +633,7 @@ float GetMonsterCombatMoveRange(W8MonsterInfo* monster_info)
     if (record == 0) {
         srAssertFail("pMonsterDB", MONSTER_MANAGER_CPP, 0x66a, 0);
     }
-    result = record->combat_move_range * g_monster_record_float_scale;
+    result = static_cast<double>(record->combat_move_range) * g_monster_record_float_scale;
     return result;
 }
 
@@ -989,7 +993,9 @@ float CalculateMonsterScale(W8MonsterInfo* monster_info)
     float maximum;
 
     MonsterGetScaleRange(monster_info->p3D, &minimum, &maximum);
-    if (minimum == 0.0f || maximum == 0.0f) {
+    /* Retail 0x004e65ef/0x004e6607: fcomp 0.0; test ah,0x40 - a NaN (unordered)
+       bound counts as zero too (found by the w8diff harness). */
+    if (!(minimum < 0.0f || minimum > 0.0f) || !(maximum < 0.0f || maximum > 0.0f)) {
         return MonsterGetScale(monster_info->p3D);
     }
 
@@ -999,19 +1005,31 @@ float CalculateMonsterScale(W8MonsterInfo* monster_info)
     W8MonsterRecord* record = MonsterDBFromSpecies(monster_info->monster_species);
     int minimum_hp = record->hit_points.Minimum();
     int maximum_hp = record->hit_points.Maximum();
-    float scale =
-        ((maximum - minimum) * (static_cast<unsigned int>(monster_info->uiHPMax) - minimum_hp)) /
-            (maximum_hp - minimum_hp) +
-        minimum;
-    float result = (maximum - minimum) * (Random(1000) * 0.0004f - 0.2f) + scale;
+    /* Retail 0x004e66c2..0x004e674a is x87 code (found by the w8diff harness):
+       uiHPMax is loaded as an unsigned 64-bit integer (fild qword) and the dice
+       bounds as ints, so uiHPMax below the minimum gives a negative span instead
+       of an unsigned wrap, and a flat die divides by zero in the FPU (inf, or NaN
+       for 0/0). Only the HP-proportional scale is stored as a float; the rest
+       stays on the FPU stack. A NaN result fails "fcom minimum; test ah,1" and
+       returns minimum. */
+    double range = static_cast<double>(maximum) - minimum;
+    float scale = static_cast<float>(
+        range *
+            (static_cast<double>(static_cast<unsigned int>(monster_info->uiHPMax)) - minimum_hp) /
+            (static_cast<double>(maximum_hp) - minimum_hp) +
+        minimum);
+    double result =
+        range *
+            (static_cast<double>(static_cast<unsigned int>(Random(1000))) * 0.0004f - 0.2f) +
+        scale;
 
-    if (result < minimum) {
+    if (!(result >= minimum)) {
         return minimum;
     }
     if (result > maximum) {
         return maximum;
     }
-    return result;
+    return static_cast<float>(result);
 }
 
 // FUNCTION: WIZ8 0x004e67a0
@@ -1501,52 +1519,55 @@ void ProcessMonsterManagerFrame(void)
         } else if ((monster->runtime_flags & W8_MONSTER_REMOVE_NOW) != 0) {
             RemoveMonster(monster_list_index, true);
             --monster_list_index;
-        } else if ((monster->runtime_flags & W8_MONSTER_SCRIPT_WAIT) == 0) {
-            if ((monster->runtime_flags & W8_MONSTER_PARKED) == 0) {
-                int query_state = MonsterQuery(monster, W8_MONSTER_QUERY_CYCLE);
-                TryStartMonsterCycle2(monster_info, monster, query_state);
-                if (MonsterQuery(monster, W8_MONSTER_QUERY_CYCLE_COMPLETE) != 0) {
-                    if (gXStatus.fCombatMode && query_state == 0x12) {
-                        monster_info->pCombat->special_ready = true;
-                    }
-                    switch (query_state) {
-                    case 1:
-                    case 3:
-                    case 4:
-                    case 0x17:
-                    case 0x18:
-                        break;
-                    case 0x15:
-                        if ((monster->runtime_flags & W8_MONSTER_REMOVE_AFTER_FADE) == 0) {
-                            monster_info = MonsterGetScriptPartByLocationIndex(monster_list_index);
-                            HandleScriptedNpcDeath(monster_list_index);
-                            if (monster_info->monster_group_id != 0) {
-                                RemoveMonster(monster_list_index, false);
-                            }
-                            DropMonsterLoot(monster_info, -1);
-                            monster_info->p3D->BeginDelayedRemoval();
-                        }
-                        break;
-                    default:
-                        if (!monster_info->fMotionless) {
-                            /* pending_cycle is signed char; the rest of this
-                               unit and the representation compare the empty
-                               slot to -1. W8_CYCLE_NONE is 0xff as int 255,
-                               which a signed char never equals. */
-                            if (monster_info->p3D->m_pRep->pending_cycle == -1) {
-                                StartMonsterCycle(monster_info, W8_MONSTER_CYCLE_IDLE,
-                                                  W8_ANIMATION_NEVER_STOP);
-                            }
-                        } else if (MonsterIsAnimating(monster) != 0) {
-                            MonsterSetAnimating(monster, false);
-                        }
-                        break;
-                    }
-                }
-            }
-        } else {
+        } else if ((monster->runtime_flags & W8_MONSTER_SCRIPT_WAIT) != 0) {
+            /* Retail 0x004E5002..0x004E500A: blocked on a MonScript CYCLE -
+               skip this monster for the frame (no update, no removal). */
+        } else if ((monster->runtime_flags & W8_MONSTER_PARKED) != 0) {
+            /* Retail 0x004E5010..0x004E5022: a parked (departed) monster is
+               removed in place. */
             RemoveMonster(monster_list_index, true);
             --monster_list_index;
+        } else {
+            int query_state = MonsterQuery(monster, W8_MONSTER_QUERY_CYCLE);
+            TryStartMonsterCycle2(monster_info, monster, query_state);
+            if (MonsterQuery(monster, W8_MONSTER_QUERY_CYCLE_COMPLETE) != 0) {
+                if (gXStatus.fCombatMode && query_state == 0x12) {
+                    monster_info->pCombat->special_ready = true;
+                }
+                switch (query_state) {
+                case 1:
+                case 3:
+                case 4:
+                case 0x17:
+                case 0x18:
+                    break;
+                case 0x15:
+                    if ((monster->runtime_flags & W8_MONSTER_REMOVE_AFTER_FADE) == 0) {
+                        monster_info = MonsterGetScriptPartByLocationIndex(monster_list_index);
+                        HandleScriptedNpcDeath(monster_list_index);
+                        if (monster_info->monster_group_id != 0) {
+                            RemoveMonster(monster_list_index, false);
+                        }
+                        DropMonsterLoot(monster_info, -1);
+                        monster_info->p3D->BeginDelayedRemoval();
+                    }
+                    break;
+                default:
+                    if (!monster_info->fMotionless) {
+                        /* pending_cycle is signed char; the rest of this
+                           unit and the representation compare the empty
+                           slot to -1. W8_CYCLE_NONE is 0xff as int 255,
+                           which a signed char never equals. */
+                        if (monster_info->p3D->m_pRep->pending_cycle == -1) {
+                            StartMonsterCycle(monster_info, W8_MONSTER_CYCLE_IDLE,
+                                              W8_ANIMATION_NEVER_STOP);
+                        }
+                    } else if (MonsterIsAnimating(monster) != 0) {
+                        MonsterSetAnimating(monster, false);
+                    }
+                    break;
+                }
+            }
         }
     }
 }
@@ -1598,7 +1619,9 @@ float GetAveragePartyMemberLevel(void)
 {
     float total = 0.0f;
     float count = 0.0f;
-    for (int party_slot = 0; party_slot < 6; ++party_slot) {
+    /* Retail 0x004EFB7A..0x004EFBB6: starts at XChar[2]/Char[2] and runs six
+       times - the six PC slots 2..7; RPC slots 0..1 are not counted. */
+    for (int party_slot = 2; party_slot < 8; ++party_slot) {
         if (g_status.buffers.XChar[party_slot].fOccupied) {
             total += g_status.buffers.Char[party_slot].uiExpLevel;
             count += 1.0f;
@@ -1616,8 +1639,12 @@ unsigned int GetBestPartySkillLevel(W8Skill skill_index, int* party_slot)
     int best_slot = -1;
     for (int index = 0; index < 8; ++index) {
         W8Character* character = &g_status.buffers.Char[index];
+        /* Retail 0x005544ce compares the condition unsigned (cmp [edi],0xd / jae):
+           a condition >= 0x80000000 disqualifies the slot (found by the w8diff
+           harness). */
         if (g_status.buffers.XChar[index].fOccupied && character->hp_current != 0 &&
-            character->highest_condition < W8_CONDITION_TURNCOAT &&
+            static_cast<unsigned int>(character->highest_condition) <
+                static_cast<unsigned int>(W8_CONDITION_TURNCOAT) &&
             (character->skills[skill_index].level > best_level || best_slot == -1)) {
             best_level = character->skills[skill_index].level;
             best_slot = index;
@@ -1661,14 +1688,21 @@ void FormatMonsterHealth(W8MonsterInfo* monster_info, wchar_t* health_text)
         record = GetMonsterDataForInfo(monster_info);
         monster_level = record->display_level;
         health_knowledge = GetBestPartySkillLevel(W8_SKILL_MYTHOLOGY, &best_party_slot);
-        if (static_cast<int>(average_party_level) < monster_level) {
-            float adjusted_knowledge = health_knowledge -
-                                       (monster_level - average_party_level) * g_float_three +
-                                       g_float_half;
+        /* Retail 0x004e5444..0x004e548f is x87 code: the knowledge is loaded as an
+           unsigned 64-bit integer (fild qword), the sum stays in the FPU stack and
+           _ftol truncates to 64 bits of which the low dword is kept. A float sum
+           rounded 0xffffffff - 15 + 0.5 up to 2^32 and the float->unsigned cast
+           gave 0 instead of retail's 0xfffffff0 (found by the w8diff harness). */
+        if (static_cast<int>(static_cast<long long>(average_party_level)) < monster_level) {
+            double adjusted_knowledge =
+                static_cast<double>(health_knowledge) -
+                (static_cast<double>(monster_level) - average_party_level) * g_float_three +
+                g_float_half;
             if (adjusted_knowledge < g_float_zero) {
                 adjusted_knowledge = g_float_zero;
             }
-            health_knowledge = static_cast<unsigned int>(adjusted_knowledge);
+            health_knowledge =
+                static_cast<unsigned int>(static_cast<long long>(adjusted_knowledge));
         }
     }
 

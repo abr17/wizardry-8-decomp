@@ -165,11 +165,13 @@ void GDProp::Initialize(srModelInstance* instance, bool attach, unsigned short p
                                &m_pVertices[surface->vertex_indices[1]],
                                &m_pVertices[surface->vertex_indices[2]]);
 
-            int dominant_axis;
+            int dominant_axis = 0;
             float largest = 0.0f;
             for (int axis = 0; axis < 3; ++axis) {
                 float magnitude = static_cast<float>(fabs((&surface->plane.normal.x)[axis]));
-                if (largest < magnitude) {
+                /* Retail 0x4b7219: fcom; test ah,1 -> taken on less OR unordered, so a degenerate
+                   triangle's NaN normal ends on axis 2 (flags 0x802); !(>=) keeps that. */
+                if (!(largest >= magnitude)) {
                     largest = magnitude;
                     dominant_axis = axis;
                 }
@@ -198,8 +200,10 @@ void GDProp::Initialize(srModelInstance* instance, bool attach, unsigned short p
         mesh = mesh->next;
     }
 
-    W8PathingService* pathing = g_octree->pathing;
-    if (m_path_handle != 0 && pathing != 0) {
+    /* Retail 0x4b7315: g_octree is read only after m_path_handle != 0 (and again in the
+       door branch), so a prop built without an octree never dereferences it. */
+    if (m_path_handle != 0 && g_octree->pathing != 0) {
+        W8PathingService* pathing = g_octree->pathing;
         if (!attach) {
             if (m_prop_number != 0xffff) {
                 m_prop_number = 0xffff;
@@ -228,6 +232,7 @@ void GDProp::Initialize(srModelInstance* instance, bool attach, unsigned short p
                  static_cast<W8DoorTriggerActionData*>(action)->locked)) {
                 flags = W8_PATH_CELL_DOOR | W8_PATH_CELL_BLOCKED;
             }
+            W8PathingService* pathing = g_octree->pathing; /* Retail 0x4b73fe: re-read */
             if (pathing != 0) {
                 pathing->UpdateConditionalPathFlags(m_path_handle, m_prop_number, flags);
             }
@@ -400,10 +405,14 @@ unsigned char GDProp::RegisterPathVertex(unsigned int index, const srVector2i* p
     } else {
         float slope = dx / dy;
         float cross = (m_path_bounds.min_z - y0) * slope + x0;
-        if (cross > m_path_bounds.min_x - 1 && cross < m_path_bounds.max_x + 1) {
+        float lo = static_cast<float>(m_path_bounds.min_x - 1);
+        float hi = static_cast<float>(m_path_bounds.max_x + 1);
+        /* Retail 0x4b79b2/0x4b79cc: "lo < cross" and "cross < hi" use test ah,1, so an
+           unordered compare passes both (dx == dy == 0 -> NaN slope registers the link). */
+        if (!(lo >= cross) && !(cross >= hi)) {
             found = true;
         }
-        if (cross > m_path_bounds.min_x - 1 && cross < m_path_bounds.max_x + 1) {
+        if (cross > lo && cross < hi) {
             found = true;
         }
     }
@@ -635,11 +644,13 @@ void GDProp::TransformMeshGeometry(const W8LevelFileScaledPathNode* node, W8Leve
                            &m_pVertices[surface->vertex_indices[1]],
                            &m_pVertices[surface->vertex_indices[2]]);
 
-        int dominant_axis;
+        int dominant_axis = 0;
         float largest = g_float_zero;
         for (int axis = 0; axis < 3; ++axis) {
             float magnitude = static_cast<float>(fabs((&surface->plane.normal.x)[axis]));
-            if (largest < magnitude) {
+            /* Retail 0x4b8556: fcom; test ah,1 -> taken on less OR unordered, so a degenerate
+               triangle's NaN normal ends on axis 2; !(>=) keeps that NaN behavior. */
+            if (!(largest >= magnitude)) {
                 largest = magnitude;
                 dominant_axis = axis;
             }

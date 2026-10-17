@@ -74,8 +74,8 @@ unsigned short g_enchantment_notices[16] = {
 /* Notices posted when a condition interrupts a character's action, indexed
    by GetConditionInterrupt's result. */
 // GLOBAL: WIZ8 0x0061e658
-unsigned short g_condition_interrupt_notices[12] = {
-    0x3a0, 0x3a1, 0x3a2, 0x3a3, 0x3a4, 0x3a5, 0x3a6, 0x3a7, 0x3a8, 0x3a9, 0x3aa, 0x3ab,
+unsigned short g_condition_interrupt_notices[13] = {
+    0x3a0, 0x3a1, 0x3a2, 0x3a3, 0x3a4, 0x3a5, 0x3a6, 0x3a7, 0x3a8, 0x3a9, 0x3aa, 0x3ab, 0x3ac,
 };
 
 // FUNCTION: WIZ8 0x005248a0
@@ -149,8 +149,11 @@ void RemoveCharacterCondition(int party_slot, W8Condition condition, bool announ
                          "C:\\Projects\\Wizardry 8\\Local Code\\Conditions & Enchantments.cpp",
                          0xf5, 0);
         }
+        /* Found by the w8diff harness: retail 0x00523417 (cmp ..., 0xd; setb) and the
+           tail at 0x00523630 (jae) compare highest_condition unsigned. */
         if (party_slot >= 0 && party_slot < 8 && row->fOccupied && character->hp_current != 0) {
-            can_rest = character->highest_condition < W8_CONDITION_TURNCOAT;
+            can_rest = static_cast<unsigned int>(character->highest_condition) <
+                       W8_CONDITION_TURNCOAT;
         } else {
             can_rest = false;
         }
@@ -206,7 +209,8 @@ void RemoveCharacterCondition(int party_slot, W8Condition condition, bool announ
         RebuildConditionsAndDerivedStats(party_slot);
         QueueConditionClearedReaction(character, condition);
         if (!can_rest && party_slot > -1 && party_slot < 8 && row->fOccupied &&
-            character->hp_current != 0 && character->highest_condition < W8_CONDITION_TURNCOAT &&
+            character->hp_current != 0 &&
+            static_cast<unsigned int>(character->highest_condition) < W8_CONDITION_TURNCOAT &&
             gXStatus.fCombatMode &&
             CharacterCanSwitchTo(party_slot, W8_TARGETING_CONTEXT_IN_COMBAT, false, false)) {
             RefreshCombatTargetHighlights(party_slot, &row->target_in_combat);
@@ -354,7 +358,11 @@ void RecomputeCharacterHighestCondition(int party_slot)
         UpdateFormationSlotState(&gXStatus.edited_formation, party_slot);
         UpdateFormationSlotState(&g_combat_state->saved_formation, party_slot);
     }
-    if ((previous < W8_CONDITION_DEAD) != (character->highest_condition < W8_CONDITION_DEAD)) {
+    /* Found by the w8diff harness: retail 0x005238AD..0x005238CF compares the old
+       and the new value with jae, i.e. unsigned; a stored highest_condition of
+       0x80000000 or -1 counts as dead, not alive. */
+    if ((static_cast<unsigned int>(previous) < W8_CONDITION_DEAD) !=
+        (static_cast<unsigned int>(character->highest_condition) < W8_CONDITION_DEAD)) {
         RedistributePartyEncumbrance();
     }
     RequestPartySlotRedraw(party_slot);
@@ -490,7 +498,7 @@ void SetMonsterCondition(int location_id, W8Condition condition, int duration, i
     W8ConditionImmunity* immunity;
     unsigned char kind;
     int index;
-    int old_duration;
+    unsigned int old_duration;
     bool handled;
 
     if (poison_strength != 0 && condition != W8_CONDITION_POISONED) {
@@ -533,7 +541,9 @@ void SetMonsterCondition(int location_id, W8Condition condition, int duration, i
         }
     }
     old_duration = monster_info->uiCondition[condition];
-    if (old_duration < duration) {
+    /* Retail 0x00523CD4: cmp ebx,edi; jbe -- the new duration replaces the old
+       one only when it is larger as an unsigned value. */
+    if (old_duration < static_cast<unsigned int>(duration)) {
         monster_info->uiCondition[condition] = duration;
         if (old_duration == 0) {
             if (condition == W8_CONDITION_HEXED || condition == W8_CONDITION_BLIND) {

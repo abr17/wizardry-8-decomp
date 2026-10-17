@@ -1,4 +1,5 @@
 #include "wiz8/local_code/ItemManager.h"
+#include "wiz8/canvas.h" /* mod: DisplayViewDistanceScale */
 #include "wiz8/local_code/PC_Item.h"
 #include "wiz8/layouts/game_status.h"
 #include "wiz8/engine_code/GDCamera.h"
@@ -341,7 +342,10 @@ W8WorldItem* GetNextWorldItem(bool restart)
         g_world_item_cursor = 0;
     }
     index = g_world_item_cursor;
-    if (static_cast<unsigned int>(index) < PLLength(gXStatus.plsItemList)) {
+    /* Retail 0x004f82d5: cmp ecx,eax / jge - a signed compare of the cursor with the
+       list length, so a negative cursor still reads and advances, and a negative
+       iNumUsed ends the walk (found by the w8diff harness). */
+    if (index < static_cast<int>(PLLength(gXStatus.plsItemList))) {
         ++g_world_item_cursor;
         return GetWorldItemListEntry(index);
     }
@@ -801,7 +805,9 @@ int PickNearestItemUnderCursor(int cursor_x, int cursor_y, float max_distance)
             continue;
         }
         distance = ItemDistanceToCamera(GetWorld(), item->p3D);
-        if (distance < max_distance && distance < best_distance) {
+        /* Retail 0x004F7435: two fcom + test ah,1 checks; an unordered (NaN) distance
+           passes both, so they are written as !(>=). */
+        if (!(distance >= max_distance) && !(distance >= best_distance)) {
             result = item->runtime_id;
             best_distance = distance;
         }
@@ -832,7 +838,11 @@ void UpdateNearbyWorldItems(void)
             AdvanceFallingWorldItem(item);
         }
         if (!item->fActive) {
-            if (DistanceBetweenPoints(&item->position, &camera) < g_item_camera_cull_distance) {
+            /* Retail 0x004F75A2: fcomp + test ah,1, so a NaN distance also activates;
+               written as !(>=) to keep that. */
+            /* Mod: draw distance (canvas.h) also moves the item visibility limit. */
+            if (!(DistanceBetweenPoints(&item->position, &camera) >=
+                  g_item_camera_cull_distance * DisplayViewDistanceScale())) {
                 if (g_hide_invisible_items) {
                     if (item == 0) {
                         srAssertFail("pItemInfo != NULL", ITEM_MANAGER_CPP, 0x3e6, 0);
@@ -847,7 +857,8 @@ void UpdateNearbyWorldItems(void)
             srVector3T<float> location;
 
             item->p3D->m_pRep->GetLocation(&location);
-            if (DistanceBetweenPoints(&location, &camera) > g_float_twenty_five_thousand) {
+            if (DistanceBetweenPoints(&location, &camera) >
+                g_float_twenty_five_thousand * DisplayViewDistanceScale()) { /* mod */
                 DeactivateWorldItem(item);
             }
         }
@@ -866,13 +877,15 @@ void DropHeldItem(int)
 {
     srVector3T<float> cursor;
     GetCursorScaledPosition(&cursor);
+    /* Retail 0x004F761D..0x004F769B: centres screen x/y (cursor.z is the unused 0);
+       pitch scales cursor.y by 71, yaw scales cursor.x by 85. */
+    cursor.x = (cursor.x - g_float_half) * g_float_nine_tenths;
     cursor.y = (cursor.y - g_float_half) * g_float_nine_tenths;
-    cursor.z = (cursor.z - g_float_half) * g_float_nine_tenths;
 
     double amplitude = g_throw_angle_amplitude * g_float_inverse_half_turn_degrees;
-    double pitch = amplitude * g_float_five + amplitude * cursor.z * g_drop_item_pitch_scale;
+    double pitch = amplitude * g_float_five + amplitude * cursor.y * g_drop_item_pitch_scale;
     float base = static_cast<float>(cos(pitch) * g_double_twenty_five_hundred);
-    double yaw = amplitude * cursor.y * g_drop_item_yaw_scale;
+    double yaw = amplitude * cursor.x * g_drop_item_yaw_scale;
 
     srVector3T<float> direction;
     direction.y = static_cast<float>(sin(pitch) * g_drop_item_vertical_scale);
@@ -1093,7 +1106,9 @@ static bool IsWorldItemMarkerVisible(W8WorldItem* item, const srVector3T<float>&
         item->p3D->m_pRep->GetLocation(&position);
         GetCameraPosition(&eye);
         srVector3T<float> delta = position - camera;
-        if (delta.Length() < static_cast<float>(g_double_twenty_five_hundred)) {
+        /* Retail 0x004F86FD/0x004F87F6: fcomp qword 2500.0 + test ah,1, so a NaN
+           length also passes; written as !(>=) to keep that. */
+        if (!(delta.Length() >= static_cast<float>(g_double_twenty_five_hundred))) {
             item->p3D->GetCachedLocalBounds(&lower, &upper);
             lower += position;
             upper += position;
@@ -1158,7 +1173,9 @@ unsigned char AdvanceFallingWorldItem(W8WorldItem* item)
     }
 
     ground = g_octree->SettleToGround(&probe, &hit, 1, 250.0f);
-    if (!hit || fabs(ground - previous_y) < g_camera_snap_epsilon) {
+    /* Retail 0x004F92E1: fcomp + test ah,1, so an unordered (NaN) compare also
+       counts as landed; written as !(>=) to keep that NaN behaviour. */
+    if (!hit || !(fabs(ground - previous_y) >= g_camera_snap_epsilon)) {
         item->flags &= ~W8_WORLD_ITEM_FALLING;
         item->vertical_velocity = 0.0f;
         return 0;
@@ -1179,10 +1196,14 @@ unsigned char AdvanceFallingWorldItem(W8WorldItem* item)
         item->vertical_velocity = (ground - previous_y) / dt;
         probe.y = ground;
     } else {
-        item->vertical_velocity = dt * g_navigator_gravity * g_float_half + item->vertical_velocity;
-        probe.y = probe.y - dt * item->vertical_velocity;
-        if (probe.y < ground) {
+        float velocity = dt * g_navigator_gravity * g_float_half + item->vertical_velocity;
+        probe.y = probe.y - dt * velocity;
+        /* Retail 0x004F935B: fcomp + test ah,1 clamps (also when unordered, hence !(>=))
+           and drops the new velocity; only the unclamped path stores it (0x004F9387). */
+        if (!(probe.y >= ground)) {
             probe.y = ground;
+        } else {
+            item->vertical_velocity = velocity;
         }
     }
 
@@ -1395,10 +1416,16 @@ void DropMonsterLoot(W8MonsterInfo* monster_info, int value)
         if (gold != 0) {
             AddPartyGold(gold, true);
         }
+        /* Retail 0x004F9099: `cmp count, 1; jle` and then `jne` on the same
+           flags - one drop is adopted, none drops nothing. Treating zero like
+           one appended the vector's unset slot to the item list, and the next
+           UpdateNearbyWorldItems crashed in ActivateItem on that garbage. */
         if (items.GetCount() <= 1) {
-            item = *items.GetAt(0);
-            PLAdoptAppend(gXStatus.plsItemList, item);
-            item->position = position;
+            if (items.GetCount() == 1) {
+                item = *items.GetAt(0);
+                PLAdoptAppend(gXStatus.plsItemList, item);
+                item->position = position;
+            }
         } else {
             W8WorldItem* container;
             int item_index;

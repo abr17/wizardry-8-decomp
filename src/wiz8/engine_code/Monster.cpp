@@ -403,7 +403,8 @@ unsigned char ReadOrCloneMonsterCycles(const W8GrCycleLoadContext* context,
         }
     } else {
         char line[250];
-        while (more != 0) {
+        /* Retail 0x004C0531/0x004C0543: parsing stops once a cycle LoadGrCycle fails. */
+        while (more != 0 && success) {
             ReadTextLine(handle, line, sizeof(line), &more);
             while (line[0] == '\0' && more != 0) {
                 ReadTextLine(handle, line, sizeof(line), &more);
@@ -870,7 +871,12 @@ void W8Monster::RandomizeAppearanceAndMotion()
     /* 0x004C1D3D: cmp/setl - a signed test against the LEFTHANDED percent. */
     mirror_x = static_cast<int>(Random(100)) < m_pRep->left_handed;
 
-    if (m_pRep->minimum_scale != g_float_zero && m_pRep->maximum_scale != g_float_zero) {
+    /* Retail 0x004c1d48/0x004c1d5f: fcomp 0.0; test ah,0x40 - a NaN bound counts
+       as zero like 0.0 does and leaves the scale alone. Every random range below
+       is evaluated on the x87 stack as (Random(1000) * 0.001f) * (max - min) + min
+       and rounded once on the store (found by the w8diff harness). */
+    if ((m_pRep->minimum_scale < g_float_zero || m_pRep->minimum_scale > g_float_zero) &&
+        (m_pRep->maximum_scale < g_float_zero || m_pRep->maximum_scale > g_float_zero)) {
         float minimum = m_pRep->minimum_scale;
         float maximum = m_pRep->maximum_scale;
 
@@ -878,14 +884,18 @@ void W8Monster::RandomizeAppearanceAndMotion()
             srAssertFail("flStart <= flEnd", MONSTER_CPP, 0x2f5, 0);
         }
         random_value = Random(1000);
-        m_pRep->scale = (maximum - minimum) * random_value * g_float_one_thousandth + minimum;
+        m_pRep->scale = static_cast<float>(static_cast<double>(random_value) *
+                                               g_float_one_thousandth *
+                                               (static_cast<double>(maximum) - minimum) +
+                                           minimum);
     }
 
     if (m_pRep->random_idle) {
         int subcycle;
-        float playback_scale = (m_pRep->random_idle_fps_max - m_pRep->random_idle_fps_min) *
-                                   Random(1000) * g_float_one_thousandth +
-                               m_pRep->random_idle_fps_min;
+        float playback_scale = static_cast<float>(
+            static_cast<double>(static_cast<unsigned int>(Random(1000))) * g_float_one_thousandth *
+                (static_cast<double>(m_pRep->random_idle_fps_max) - m_pRep->random_idle_fps_min) +
+            m_pRep->random_idle_fps_min);
 
         for (subcycle = 0; subcycle < static_cast<signed char>(m_pRep->animations[1].GetCount());
              ++subcycle) {
@@ -912,26 +922,58 @@ void W8Monster::RandomizeAppearanceAndMotion()
         }
     }
 
-    movement.vertical_base = ((hover_base_max - hover_base_min) * static_cast<float>(Random(1000)) *
-                                  g_float_one_thousandth +
-                              hover_base_min) *
-                             g_world_scale;
-    movement.vertical_amplitude = ((bob_amplitude_max - bob_amplitude_min) *
-                                       static_cast<float>(Random(1000)) * g_float_one_thousandth +
-                                   bob_amplitude_min) *
-                                  g_world_scale;
-    movement.vertical_phase = Random(1000) * g_float_one_thousandth;
+    movement.vertical_base = static_cast<float>(
+        (static_cast<double>(static_cast<unsigned int>(Random(1000))) * g_float_one_thousandth *
+             (static_cast<double>(hover_base_max) - hover_base_min) +
+         hover_base_min) *
+        g_world_scale);
+    movement.vertical_amplitude = static_cast<float>(
+        (static_cast<double>(static_cast<unsigned int>(Random(1000))) * g_float_one_thousandth *
+             (static_cast<double>(bob_amplitude_max) - bob_amplitude_min) +
+         bob_amplitude_min) *
+        g_world_scale);
+    /* Retail 0x004c1f85..0x004c1fae: the phase is stored as a float (fst) but the
+       unrounded product feeds fsin, and the sine is not rounded before the
+       multiply-add (found by the w8diff harness). */
+    double phase =
+        static_cast<double>(static_cast<unsigned int>(Random(1000))) * g_float_one_thousandth;
+    movement.vertical_phase = static_cast<float>(phase);
     movement.vertical_offset =
-        static_cast<float>(sin(movement.vertical_phase * g_motion_full_turn_radians)) *
-            movement.vertical_amplitude +
-        movement.vertical_base;
+        static_cast<float>(sin(phase * g_motion_full_turn_radians) * movement.vertical_amplitude +
+                           movement.vertical_base);
     movement.height_offset += movement.vertical_base;
     movement.secondary_height_offset += movement.vertical_base;
 
-    if (this->scale < g_float_one) {
+    /* Retail 0x004c1fde: fcomp 1.0; test ah,1 - "below one" is also taken for a
+       NaN scale (found by the w8diff harness). */
+    if (!(this->scale >= g_float_one)) {
         m_pRep->instance_scale = this->scale;
         m_pRep->apply_instance_scale = true;
     }
+}
+
+/* MSVCRT.dll's atoi, which retail imports (0x005eb1b0): leading white space,
+   one sign, then digits accumulated with 32-bit wrap-around. The static UCRT
+   atoi clamps an overflow to INT_MAX instead, so "...4294967297" gave 0xff
+   rather than retail's 1 (found by the w8diff harness). */
+static int RetailAtoi(const char* text)
+{
+    const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text);
+    unsigned int total = 0;
+    unsigned char sign;
+
+    while (*cursor == ' ' || (*cursor >= '\t' && *cursor <= '\r')) {
+        ++cursor;
+    }
+    sign = *cursor;
+    if (sign == '-' || sign == '+') {
+        ++cursor;
+    }
+    while (*cursor >= '0' && *cursor <= '9') {
+        total = total * 10u + static_cast<unsigned int>(*cursor - '0');
+        ++cursor;
+    }
+    return static_cast<int>(sign == '-' ? 0u - total : total);
 }
 
 // FUNCTION: WIZ8 0x004C2010
@@ -963,10 +1005,19 @@ W8MonsterCycle ParseMonsterCycleName(const char* name, signed char* subcycle)
 
     if (subcycle != 0) {
         *subcycle = 1;
-        int suffix = g_cycle_names[cycle].prefix_length;
-        if (static_cast<int>(strlen(name)) > suffix && name[suffix] >= '0' && name[suffix] <= '9') {
-            /* The retail atoi offset uses the search index even after a fallback. */
-            *subcycle = static_cast<signed char>(atoi(name + g_cycle_names[index].prefix_length));
+        /* Retail 0x004c20b7 indexes the table with the result and 0x004c20db with
+           the search index, so an unmatched name reads g_cycle_names[-1] and a
+           full miss (also when FLY/EXPLODE matched) reads g_cycle_names[27].
+           Those bytes are retail's neighbours: the low byte of the pointer before
+           the table (0x0060ec0c -> 12) and the 'I' (73) of the "SPECIAL" string
+           after it. The port supplies the same two values instead of reading its
+           own neighbours (found by the w8diff harness). */
+        int suffix = cycle == W8_MONSTER_CYCLE_NONE ? 0x0c : g_cycle_names[cycle].prefix_length;
+        int offset =
+            index == W8_MONSTER_CYCLE_COUNT ? 'I' : g_cycle_names[index].prefix_length;
+        if (strlen(name) > static_cast<unsigned int>(suffix) && name[suffix] >= '0' &&
+            name[suffix] <= '9') {
+            *subcycle = static_cast<signed char>(RetailAtoi(name + offset));
         }
     }
     return cycle;
@@ -1898,6 +1949,8 @@ void W8Monster::ProcessScript()
         if (script_line >= script->lines.GetCount()) {
             break;
         }
+        /* Retail 0x004C8276: error messages below report GetSourceLine(script_line) of the
+           already-advanced index (the next line's number, or -1 on the last line). */
         source_line = *script->lines.GetAt(script_line++);
         if (source_line == 0 || source_line->text == 0) {
             continue;
@@ -1947,7 +2000,7 @@ void W8Monster::ProcessScript()
                 if (!ResolveScriptPosition(token, &position)) {
                     ShutdownWithErrorBox(
                         FormatString("MonScript %s Line %d: Unknown location %s", script->getName(),
-                                     script->GetSourceLine(script_line - 1), token));
+                                     script->GetSourceLine(script_line), token));
                     break;
                 }
                 if (_stricmp(token, "PARTY") == 0) {
@@ -1972,7 +2025,7 @@ void W8Monster::ProcessScript()
                 if (!ResolveScriptPosition(token, &position)) {
                     ShutdownWithErrorBox(
                         FormatString("MonScript %s Line %d: Unknown location %s", script->getName(),
-                                     script->GetSourceLine(script_line - 1), token));
+                                     script->GetSourceLine(script_line), token));
                     break;
                 }
                 AimAtPosition(&position);
@@ -2035,7 +2088,7 @@ void W8Monster::ProcessScript()
                     } else {
                         ShutdownWithErrorBox(FormatString(
                             "MonScript %s Line %d: Unknown cycle %s", script->getName(),
-                            script->GetSourceLine(script_line - 1), token));
+                            script->GetSourceLine(script_line), token));
                     }
                 }
                 break;
@@ -2077,7 +2130,7 @@ void W8Monster::ProcessScript()
                     if (!ResolveScriptPosition(token, &position)) {
                         ShutdownWithErrorBox(FormatString(
                             "MonScript %s Line %d: Unknown location %s", script->getName(),
-                            script->GetSourceLine(script_line - 1), token));
+                            script->GetSourceLine(script_line), token));
                         break;
                     }
                     SetPositionInternal(&position);
@@ -2119,7 +2172,7 @@ void W8Monster::ProcessScript()
                 } else {
                     ShutdownWithErrorBox(
                         FormatString("MonScript %s Line %d: ELSE without matching IF",
-                                     script->getName(), script->GetSourceLine(script_line - 1)));
+                                     script->getName(), script->GetSourceLine(script_line)));
                 }
                 break;
             case MONSCR_ENDIF:
@@ -2128,7 +2181,7 @@ void W8Monster::ProcessScript()
                 } else {
                     ShutdownWithErrorBox(
                         FormatString("MonScript %s Line %d: ENDIF without matching IF",
-                                     script->getName(), script->GetSourceLine(script_line - 1)));
+                                     script->getName(), script->GetSourceLine(script_line)));
                 }
                 break;
             case MONSCR_DISPOSITION: {
@@ -2337,7 +2390,7 @@ void W8Monster::ProcessScript()
                     } else {
                         ShutdownWithErrorBox(FormatString(
                             "MonScript %s Line %d: Unknown direction %s", script->getName(),
-                            script->GetSourceLine(script_line - 1), token));
+                            script->GetSourceLine(script_line), token));
                     }
                 }
                 break;
@@ -2371,7 +2424,7 @@ void W8Monster::ProcessScript()
                     if (!ResolveScriptPosition(token, &position)) {
                         ShutdownWithErrorBox(FormatString(
                             "MonScript %s Line %d: Unknown location %s", script->getName(),
-                            script->GetSourceLine(script_line - 1), token));
+                            script->GetSourceLine(script_line), token));
                         break;
                     }
                     vector.Clear();
@@ -2386,7 +2439,7 @@ void W8Monster::ProcessScript()
                     if (!ResolveScriptPosition(token, &position)) {
                         ShutdownWithErrorBox(FormatString(
                             "MonScript %s Line %d: Unknown location %s", script->getName(),
-                            script->GetSourceLine(script_line - 1), token));
+                            script->GetSourceLine(script_line), token));
                         continue;
                     }
                     if (patrol_points == 0) {
@@ -2419,12 +2472,12 @@ void W8Monster::ProcessScript()
                     } else {
                         ShutdownWithErrorBox(FormatString(
                             "MonScript %s Line %d: Missing lookabout duration", script->getName(),
-                            script->GetSourceLine(script_line - 1)));
+                            script->GetSourceLine(script_line)));
                     }
                 } else {
                     ShutdownWithErrorBox(
                         FormatString("MonScript %s Line %d: Missing lookabout frequency",
-                                     script->getName(), script->GetSourceLine(script_line - 1)));
+                                     script->getName(), script->GetSourceLine(script_line)));
                 }
                 break;
             case MONSCR_STAYHOME:
@@ -2533,7 +2586,18 @@ bool W8Monster::IsPendingFinalize() const
 bool W8Monster::IsWithinWorldRange()
 {
     if (sector_mesh != 0) {
-        return sector_mesh->testFlag(srNode::FLAG_DISABLE) == 0;
+        bool enabled = sector_mesh->testFlag(srNode::FLAG_DISABLE) == 0;
+        /* Mod (draw distance): a sector is now enabled even beyond the gameplay
+           distance; for game logic (group detection, patrol, targets)
+           we additionally require the monster to be within the gameplay distance,
+           as with k = 1. */
+        if (enabled && WorldGetRenderFarScale(GetWorld()) != 1.0) {
+            double far_clip = WorldGetFarClip(GetWorld());
+            srVector3T<float> delta = g_startup_world->GetPosition() - GetPosition();
+            enabled = delta.LengthSquared() <=
+                      static_cast<float>(far_clip) * static_cast<float>(far_clip);
+        }
+        return enabled;
     } else {
         double far_clip = WorldGetFarClip(GetWorld());
         srVector3T<float> position = GetPosition();
@@ -3017,7 +3081,7 @@ float W8Monster::GetPointDistanceToPlayer(srVector3T<float> point)
     player_position.y -= g_default_world_height;
     distance = (point - player_position).Length() - movement.alternate_radius -
                g_startup_world->movement.alternate_radius;
-    if (distance < g_float_zero) {
+    if (!(distance >= g_float_zero)) { /* retail fcom 0.0; test ah,1: NaN clamps to 0 too */
         distance = g_float_zero;
     }
     return distance;
@@ -3031,7 +3095,7 @@ float W8Monster::GetDistanceToMonster(W8Monster* monster)
     float distance = (position - other_position).Length() - movement.alternate_radius -
                      monster->movement.alternate_radius;
 
-    if (distance < g_float_zero) {
+    if (!(distance >= g_float_zero)) { /* retail fcom 0.0; test ah,1: NaN clamps to 0 too */
         distance = g_float_zero;
     }
     return distance;
@@ -3044,7 +3108,7 @@ float W8Monster::GetPointDistanceToMonster(W8Monster* monster, srVector3T<float>
     float distance = (point - position).Length() - movement.alternate_radius -
                      monster->movement.alternate_radius;
 
-    if (distance < g_float_zero) {
+    if (!(distance >= g_float_zero)) { /* retail fcom 0.0; test ah,1: NaN clamps to 0 too */
         distance = g_float_zero;
     }
     return distance;
@@ -3718,7 +3782,9 @@ void W8Monster::UpdateAttachedObjects()
             if (chunk_count > 4) {
                 chunk_count = 4;
             }
-            group_height = static_cast<float>(group * g_monster_attachment_group_spacing);
+            /* Retail 0x004C44C4: the row counter advances by 5 per group and is then
+               multiplied by 15.0 (0x5ED2A0), i.e. 75 units per row. */
+            group_height = static_cast<float>(static_cast<double>(group * 5) * g_monster_attachment_group_spacing);
 
             for (chunk_index = 0; chunk_index < chunk_count; ++chunk_index, ++index) {
                 W8MonsterSpellIcon* entry =
@@ -4080,7 +4146,8 @@ void W8Monster::UpdateShakeEvents(unsigned char previous_frame)
                     } else {
                         m_pRep->SetFrameMethod(W8_ANIMATION_PING_PONG);
                         m_pRep->first_frame = animation->start_frame;
-                        if (animation->end_frame < GetNumSubCycles()) {
+                        /* Retail 0x004C353A: unsigned byte compare (cmp bl,al; jae). */
+                        if (animation->end_frame < static_cast<unsigned char>(GetNumSubCycles())) {
                             m_pRep->last_frame = animation->end_frame;
                         } else {
                             m_pRep->last_frame = GetNumSubCycles() - 1;
@@ -5220,7 +5287,8 @@ W8Item* CreateMonsterIconItem(W8World* world, const char* path, int flag)
         texture->loadSurface();
         texture->autoRelease();
         stModelInstance* instance =
-            static_cast<stModelInstance*>(MakePosterQuad(texture, 500.0f, 0.0f, true));
+            /* Retail 0x004C5583: 500x500 quad (both width and height are 500.0f). */
+            static_cast<stModelInstance*>(MakePosterQuad(texture, 500.0f, 500.0f, true));
         if (instance != 0) {
             srVector3T<float> offset(0.0f, 250.0f, 0.0f);
             static_cast<srMeshModel*>(instance->getModel())->relocateVertices(offset);

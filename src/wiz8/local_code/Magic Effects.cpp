@@ -488,7 +488,10 @@ bool TargetResistsCondition(W8CombatSlot* target, W8SpellRealm realm, unsigned i
         level = character->uiExpLevel;
         highest_condition = character->highest_condition;
     }
-    if (highest_condition >= W8_CONDITION_DEAD) {
+    /* Found by the w8diff harness: retail 0x005521A1 is cmp eax,0x12 / jb, an
+       unsigned test, so an out-of-range highest condition (0xffffffff) counts
+       as dead and resists. */
+    if (static_cast<unsigned int>(highest_condition) >= W8_CONDITION_DEAD) {
         return true;
     }
 
@@ -653,7 +656,10 @@ float HeadingTowardNearestMonster(srVector3T<float> point, W8Disposition disposi
     srVector3T<float> position;
     w8_ulong* location_ids;
     double nearest_distance;
-    float distance;
+    double distance;
+    double dx;
+    double dy;
+    double dz;
     float range;
     unsigned int count;
     unsigned int index;
@@ -682,10 +688,15 @@ float HeadingTowardNearestMonster(srVector3T<float> point, W8Disposition disposi
     for (index = 0; index < count; ++index) {
         monster = GetMonsterByLocationID(location_ids[index]);
         position = monster->GetPosition();
-        distance = sqrtf((position.x - point.x) * (position.x - point.x) +
-                         (position.y - point.y) * (position.y - point.y) +
-                         (position.z - point.z) * (position.z - point.z));
-        if (distance < nearest_distance || index == 0) {
+        /* Retail 0x00550029: differences, squares (z, y, x order) and fsqrt all stay
+           on the x87 stack unrounded to float; the distance is compared as a double. */
+        dx = static_cast<double>(position.x) - static_cast<double>(point.x);
+        dy = static_cast<double>(position.y) - static_cast<double>(point.y);
+        dz = static_cast<double>(position.z) - static_cast<double>(point.z);
+        distance = sqrt(dz * dz + dy * dy + dx * dx);
+        /* Retail 0x00550052: fcom + test ah,1 takes the candidate when less OR
+           unordered, so !(>=) keeps the NaN behavior. */
+        if (!(distance >= nearest_distance) || index == 0) {
             nearest_distance = distance;
             nearest = monster;
         }
@@ -1026,7 +1037,9 @@ bool ResolveAttackOnTarget(const W8TargetSource* source, W8CombatSlot* target,
         highest_condition = monster_info->highest_condition;
     }
 
-    if (highest_condition >= W8_CONDITION_DEAD) {
+    /* Found by the w8diff harness: retail 0x00551C4C is cmp [eax],0x12 / jb
+       (unsigned); a signed test let 0xffffffff through to SetMonsterCondition. */
+    if (static_cast<unsigned int>(highest_condition) >= W8_CONDITION_DEAD) {
         return true;
     }
     if (condition_id == W8_CONDITION_MISSING) {
@@ -2083,6 +2096,9 @@ void ApplyCombatEffectSlot(W8SpellEffectEntry* effect)
     int index;
 
     spell_id = effect->kind;
+    /* Retail 0x54cde9 sets -1 before the source test; without it a monster
+       source left garbage here and character_hate[garbage] was written. */
+    source_character = -1;
     if (!gXStatus.fCombatMode) {
         srAssertFail("gXStatus.fCombatMode", MAGIC_EFFECTS_CPP, 0x329, 0);
     }
@@ -2092,14 +2108,19 @@ void ApplyCombatEffectSlot(W8SpellEffectEntry* effect)
     }
     slot_index = 0;
     table = g_combat_effect_slot_spells;
+    /* Found by the w8diff harness: retail 0x0054CE8E..0x0054CEA0 walks exactly the
+       nine entries (cmp eax,0x616dd8 / jb) and asserts when none matches. Bounding
+       the walk by the next array's address read past the table in this image (a
+       padding dword, then that array's first entry, 2), so Bless matched and armed
+       effect_slots[10]. */
     while (spell_id != *table) {
         ++table;
         ++slot_index;
-        if (table >= g_combat_effect_slot_spells_and_cast_success) {
+        if (table >= g_combat_effect_slot_spells + 9) {
             break;
         }
     }
-    if (spell_id != *table) {
+    if (table >= g_combat_effect_slot_spells + 9) {
         srAssertFail("fFound", MAGIC_EFFECTS_CPP, 0x35f, 0);
     } else {
         if (effect->target_indices.GetCount() != 0) {
@@ -2489,6 +2510,7 @@ void ApplyMonsterControlToNearbyMonsters(W8SpellEffectEntry* effect)
     srVector3T<float> lower;
     srVector3T<float> upper;
     srVector3T<float> eye;
+    srVector3T<float> los_target;
     w8_ulong* location_ids;
     unsigned int count;
     unsigned int index;
@@ -2512,7 +2534,10 @@ void ApplyMonsterControlToNearbyMonsters(W8SpellEffectEntry* effect)
         }
         eye = monster_info->p3D->movement.position;
         eye.y += monster_info->p3D->movement.height_offset;
-        if (!g_octree->HasLineOfSight(&eye, &center, true)) {
+        /* Retail 0x00551691: passes a fresh per-monster copy of center, since
+           HasLineOfSight overwrites `to` with the hit point when blocked. */
+        los_target = center;
+        if (!g_octree->HasLineOfSight(&eye, &los_target, true)) {
             continue;
         }
         if (monster_info->control_state < W8_MONSTER_CONTROL_NONE ||

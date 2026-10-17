@@ -38,6 +38,11 @@
 #include "wiz8/video_object_catalog.h"
 #include "wiz8/text_input.h"
 #include "wiz8/local_code/Strings.h"
+#include "wiz8/canvas.h"
+#include "wiz8/russian_text.h"
+#include "wiz8/layouts/world.h"
+#include "wiz8/engine_code/3d.h"
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "vsurface.h"
 #include "himage.h"
 #include "input.h"
@@ -52,6 +57,13 @@
 // GLOBAL: WIZ8 0x0069C130
 static unsigned int* g_options_panel_region_sets;
 
+/* Mod: the open resolution drop-down list covers this label (below). */
+class W8OptionsPanel;
+bool OptionsDropdownCoversText(const W8OptionsPanel* panel, const W8TextBuffer* text);
+
+/* Mod: top of the monster speed slider (5x in the original). */
+#define W8_MAX_MONSTER_SPEED 10.0f
+
 void MSYS_SGP_Mouse_Handler_Hook(unsigned short event, unsigned short x, unsigned short y,
                                  char right_button, char left_button);
 
@@ -63,6 +75,62 @@ wchar_t g_empty_wide_string;
 /* Suppress hover sounds on the registered options-row children. */
 // GLOBAL: WIZ8 0x005ed590
 extern const unsigned int g_W8TextControlSilentHover = 0x40;
+
+/* ---------------------------------------------------------------------------
+   "Wide windows" mod, stage 2 (2026-10-12): the contents of the right options panel
+   are laid out across the stretched panel, like a responsive (fluid) layout. Setting
+   labels stay at the left edge of the panel; sliders, checkboxes, toggles and
+   key buttons move to the right edge; save list rows are stretched to the
+   full width. The panel (Controls) stays centered, and each child
+   gets its own mouse-region anchor (it is drawn by the same anchor, see
+   Controls::ChildLayoutAnchor). Outside the canvas layout all shifts are zero -
+   everything as in the original.
+   --------------------------------------------------------------------------- */
+static void AnchorOptionsWidget(W8Widget* widget, int anchor)
+{
+    if (widget != 0 && widget->m_region != -1) {
+        SetRegionLayoutAnchor(static_cast<unsigned int>(widget->m_region), anchor);
+    }
+}
+
+/* Shift of a widget toward its canvas edge (0 outside the layout): for code that
+   reads the cursor itself (SGPMouseGetPos) and subtracts the widget corner from it. */
+static int OptionsWidgetAnchorShift(const W8Widget* widget)
+{
+    if (widget->m_region == -1) {
+        return 0;
+    }
+    return CanvasAnchorShift(GetRegionLayoutAnchor(static_cast<unsigned int>(widget->m_region)));
+}
+
+/* Panel label (W8TextBuffer from m_text_buffers) - which canvas edge it sits at:
+   right-aligned ones (toggle labels) - on the right, next to their
+   buttons; centered ones (headings) - centered; the rest - on the left. */
+static int OptionsTextAnchor(const W8TextBuffer* text)
+{
+    unsigned int mode = text->GetLayoutMode();
+    if ((mode & g_W8TextBufferAlignRight) != 0) {
+        return W8_ANCHOR_RIGHT;
+    }
+    if ((mode & g_W8TextBufferAlignCenter) != 0) {
+        return W8_ANCHOR_CENTER;
+    }
+    return W8_ANCHOR_LEFT;
+}
+
+/* A save list row (save_load_gamelists.sti, 352 px) in the layout is wider
+   by 2*ox: the piece [171, 299) inside the text field is repeated - the dark cracked texture
+   tiles with itself without a seam (found with wiz8-widescreen scripts/art/find_slice.py).
+   The thumbnail on the left and the frame on the right are pixel-for-pixel original. */
+enum {
+    W8_OPTIONS_SAVE_ROW_SLICE_FROM = 171,
+    W8_OPTIONS_SAVE_ROW_SLICE_TO = 299
+};
+
+static int OptionsSaveRowStretch(void)
+{
+    return CanvasWideLayoutActive() ? 2 * g_canvas_ox : 0;
+}
 
 // GLOBAL: WIZ8 0x0069c1c8
 static bool g_options_first_frame;
@@ -253,6 +321,7 @@ void W8OptionsSaveLoadPanel::Populate()
     int top = 0x12;
     for (int index = 0; index < 5; ++index) {
         W8OptionsSaveRow* row = new W8OptionsSaveRow(this, top, m_panel == 12);
+        AnchorOptionsWidget(row, W8_ANCHOR_LEFT); /* mod: stretched from the left edge */
         row->m_save_listener = this;
         m_selection.AddEntry(row);
         m_rows.Add(row);
@@ -264,6 +333,7 @@ void W8OptionsSaveLoadPanel::Populate()
         m_delete_button =
             new W8TextControl(this, 0xffffffff, 0xd, 0x1b0, 0, 0, 0xf8, 0, 6, 8, 7, -1, -1);
         m_delete_button->m_listener = this;
+        AnchorOptionsWidget(m_delete_button, W8_ANCHOR_LEFT); /* mod */
     } else {
         m_delete_button = 0;
     }
@@ -272,6 +342,7 @@ void W8OptionsSaveLoadPanel::Populate()
     m_action_button = new W8TextControl(this, 0xffffffff, 0xf5, 0x1b0, 0, 0, 0xf8, 0, first_sprite,
                                         first_sprite + 2, first_sprite + 1, -1, -1);
     m_action_button->m_listener = this;
+    AnchorOptionsWidget(m_action_button, W8_ANCHOR_RIGHT); /* mod: in the right niche */
 
     if (m_panel == 11 && g_options_screen->m_save_slots.GetCount() == 1) {
         m_delete_button->SetEnabled(false);
@@ -616,13 +687,34 @@ void W8OptionsSaveRow::Redraw(bool full_redraw)
     if (!m_active || (!full_redraw && !m_dirty)) {
         return;
     }
-    W8TextControl::Redraw(full_redraw);
+    int x = m_pPanel->m_bounds.left + m_left;
+    int y = m_pPanel->m_bounds.top + m_top;
+    if (OptionsSaveRowStretch() == 0) {
+        W8TextControl::Redraw(full_redraw);
+    } else {
+        /* Mod (wide windows): the same image W8TextControl::Redraw would pick
+           (the row has no text and no alternative images), but stretched; and
+           the mouse region covers the full length of the row. */
+        int sprite;
+        if (!m_enabled) {
+            sprite = m_disabledSprite;
+        } else if ((m_stateFlags & g_W8TextControlStatePressed) != 0) {
+            sprite = m_pressedSprite;
+        } else {
+            sprite = m_normalSprite;
+        }
+        short width;
+        short height;
+        GetCatalogImageSize(m_imageObject, m_imageFrame, sprite, &width, &height);
+        DrawCatalogImageWide(m_imageObject, m_imageFrame, sprite, x, y,
+                             static_cast<unsigned short>(width), W8_OPTIONS_SAVE_ROW_SLICE_FROM,
+                             W8_OPTIONS_SAVE_ROW_SLICE_TO, true);
+        StretchWidgetRegion(this);
+        m_dirty = false;
+    }
     if (!m_enabled || m_save == 0) {
         return;
     }
-
-    int x = m_pPanel->m_bounds.left + m_left;
-    int y = m_pPanel->m_bounds.top + m_top;
     if (m_save->screenshot.capture_result == 0) {
         DrawCatalogImage(FRAME_BUFFER, 0xf6, 0, 0, x + 6, y + 6, VO_BLT_SRCTRANSPARENCY, 0);
     } else {
@@ -640,8 +732,16 @@ void W8OptionsSaveRow::Redraw(bool full_redraw)
              m_save->timestamp.wMonth, m_save->timestamp.wDay, m_save->timestamp.wHour,
              m_save->timestamp.wMinute);
 
+    /* Mod: in a stretched row the texts are drawn from the right canvas edge (window
+       origin 2*ox) with x smaller by the stretch - on screen they stay in the same place, while clipping
+       at x + 0x156 (as in retail) falls on the end of the stretched row rather than on
+       canvas 640. Without stretching - as in retail. */
+    const int stretch = OptionsSaveRowStretch();
+    CanvasOriginScope text_scope(stretch != 0 ? 2 * g_canvas_ox : CanvasDrawOrigin());
+    /* Retail 0x5a78eb: the row texts are clipped at x + 0x156. */
+    SetFontDestBuffer(FRAME_BUFFER, 0, 0, x + 0x156, 0x1e0, 0);
     SetFont(g_wiz_text_font_secondary);
-    int text_x = x + 0x5e;
+    int text_x = x + 0x5e - stretch;
     if (m_save->version_major + m_save->version_minor * 0.1f + m_save->version_patch * 0.01f <=
         1.24f) {
         gprintf(text_x, y + 9, L"%s", level_name);
@@ -655,8 +755,11 @@ void W8OptionsSaveRow::Redraw(bool full_redraw)
     }
     gprintf(text_x, y + 0x34, L"%s", m_save->name);
     if (m_save->iron_man) {
-        gprintf(x + 0x156, y + 9, L"%s", gppStringList[0x827]);
+        /* Retail 0x5a7a92: the label is right-aligned to x + 0x156. */
+        const int width = StringPixLength(gppStringList[0x827], g_wiz_text_font_secondary);
+        gprintf(x + 0x156 - width, y + 9, L"%s", gppStringList[0x827]);
     }
+    SetFontDestBuffer(FRAME_BUFFER, 0, 0, 0x280, 0x1e0, 0); /* retail 0x5a7ad2 */
 }
 
 // FUNCTION: WIZ8 0x005a7b10
@@ -666,6 +769,7 @@ void W8OptionsSaveRow::OnLeftButtonUp(int event)
         (m_stateFlags & g_W8TextControlStateSecondary) != 0) {
         POINT point;
         SGPMouseGetPos(&point);
+        point.x -= OptionsWidgetAnchorShift(this); /* mod: the row is at the left canvas edge */
         point.x -= m_pPanel->m_bounds.left + m_left;
         point.y -= m_pPanel->m_bounds.top + m_top;
         if (m_save_mode != 0 && point.x >= 0x5c && point.y >= 0x33 && m_save_listener != 0) {
@@ -691,7 +795,16 @@ void W8OptionsScreen::BeginSaveNameEdit(W8OptionsTextEditor::Listener* listener,
 {
     W8OptionsTextEditor* editor = new W8OptionsTextEditor;
     InitTextInputModeWithScheme(1);
-    AddTextInputField(0x16b, row * 0x49 + 0x46, 0xfa, 0xc, 0x7f, text, 0x3b, 0xf, 1);
+    /* Mod (wide windows): the name field is longer by the row stretch. Its left edge
+       on the canvas is the same (under the row text), so the field is anchored to the right
+       edge, and its game x is reduced by 2*ox - so it stays entirely within
+       game 0..640 (drawing is clipped beyond that). */
+    int stretch = OptionsSaveRowStretch();
+    AddTextInputField(0x16b - stretch, row * 0x49 + 0x46, 0xfa + stretch, 0xc, 0x7f, text, 0x3b,
+                      0xf, 1);
+    if (stretch != 0) {
+        SetTextInputFieldLayoutAnchor(0, W8_ANCHOR_RIGHT);
+    }
     SetActiveField(0);
     m_text_editor = editor;
     editor->m_listener = listener;
@@ -822,6 +935,7 @@ void W8OptionsKeyboardPanel::Populate()
 
         W8OptionsKeyButton* button = new W8OptionsKeyButton(
             this, m_content_top, row->primary_binding, row->secondary_binding);
+        AnchorOptionsWidget(button, W8_ANCHOR_RIGHT); /* mod: key button at the right edge */
         m_selection.AddEntry(button);
         m_content_top += 22;
 
@@ -834,6 +948,7 @@ void W8OptionsKeyboardPanel::Populate()
             W8OptionsButton* reset =
                 new W8OptionsButton(this, left, 0x18e, left + text_width + 20, 0x1a4, reset_text);
             reset->m_listener = this;
+            AnchorOptionsWidget(reset, W8_ANCHOR_CENTER); /* mod: centered in the panel */
             return;
         }
     }
@@ -1008,9 +1123,13 @@ void W8OptionsGamePanel::Populate()
     slider->m_maximumPosition = 5000.0f;
     slider->UpdatePixelPosition();
     m_content_top += 22;
-    slider = AddSlider(0x802, &g_options_values.monster_movement_speed, true);
+    /* Mod (2026-10-16, replacing the Wiz8Fast utility): monster movement
+       speed in combat up to 10x instead of 5x. Wiz8Fast did exactly this - wrote to the
+       config a value above the slider maximum. The slider has no "1x/3x" marks
+       (the image with marks is designed for 1..5). */
+    slider = AddSlider(0x802, &g_options_values.monster_movement_speed, false);
     slider->m_minimumPosition = 1.0f;
-    slider->m_maximumPosition = 5.0f;
+    slider->m_maximumPosition = W8_MAX_MONSTER_SPEED;
     slider->UpdatePixelPosition();
     m_content_top += 22;
     AddChoices(0x7f7, 3, g_options_difficulty_labels, &g_options_values.difficulty);
@@ -1229,6 +1348,10 @@ void W8OptionsAudioPanel::OnPrimary(W8TextControl* control)
     m_sliders[index]->Invalidate(false);
 }
 
+/* Mod: draw distance slider (one per settings screen). */
+static W8OptionsSlider* g_view_distance_slider;
+static float g_view_distance_slider_value;
+
 // FUNCTION: WIZ8 0x005aa310
 void W8OptionsGraphicsPanel::Populate()
 {
@@ -1240,6 +1363,16 @@ void W8OptionsGraphicsPanel::Populate()
     slider->m_listener = this;
     slider->SetEnabled(GetRendererModeByte());
     m_content_top += 22;
+    /* Mod (2026-10-16): draw distance, 1.0 - as in the original. */
+    g_view_distance_slider_value = DisplayViewDistanceScale();
+    g_view_distance_slider =
+        AddSliderText(RussianOr(L"View distance", L"Дальность прорисовки"),
+                      &g_view_distance_slider_value);
+    g_view_distance_slider->m_minimumPosition = 1.0f;
+    g_view_distance_slider->m_maximumPosition = W8_MAX_VIEW_DISTANCE;
+    g_view_distance_slider->UpdatePixelPosition();
+    g_view_distance_slider->m_listener = this;
+    m_content_top += 22;
     AddCheckbox(0x816, &g_options_values.render_options[4]);
     AddCheckbox(0x819, &g_options_values.smooth_monster_animations);
     AddCheckbox(0x81a, &g_options_values.smooth_world_animations);
@@ -1250,13 +1383,36 @@ void W8OptionsGraphicsPanel::Populate()
 }
 
 // FUNCTION: WIZ8 0x005aa3f0
-void W8OptionsGraphicsPanel::OnDrag(W8HorizontalRangeThumb*)
+void W8OptionsGraphicsPanel::OnDrag(W8HorizontalRangeThumb* thumb)
 {
+    if (thumb != 0 && thumb == g_view_distance_slider) {
+        return; /* mod: draw distance is applied on release */
+    }
     SetDisplayGamma(g_options_values.gamma);
 }
 
 // FUNCTION: WIZ8 0x005aa400
-void W8OptionsGraphicsPanel::OnDragEnd(W8HorizontalRangeThumb*) {}
+void W8OptionsGraphicsPanel::OnDragEnd(W8HorizontalRangeThumb* thumb)
+{
+    /* Mod: the new draw distance - to the ini and immediately to the current level's camera. */
+    if (thumb != 0 && thumb == g_view_distance_slider) {
+        /* Slider position: on a click on the track without dragging there was
+           no OnMouseMove and *m_value is still the old one. */
+        g_view_distance_slider_value = g_view_distance_slider->m_position;
+        const float old_scale = DisplayViewDistanceScale();
+        DisplaySetViewDistanceScale(g_view_distance_slider_value);
+        if (g_world != 0) {
+            WorldSetFarClip(g_world, g_world->view_distance);
+            /* terrain draw range (render_range) was set at level load with the
+               old multiplier - rescale it in the same proportion */
+            const float new_scale = DisplayViewDistanceScale();
+            const float range = WorldGetRenderRange(g_world);
+            if (old_scale > 0.0f && range > 0.0f) {
+                WorldSetRenderRange(g_world, range * new_scale / old_scale);
+            }
+        }
+    }
+}
 
 // FUNCTION: WIZ8 0x005aa410
 void W8OptionsAdvancedGraphicsPanel::Populate()
@@ -1267,6 +1423,7 @@ void W8OptionsAdvancedGraphicsPanel::Populate()
     AddCheckbox(0x812, &g_options_values.render_options[0]);
     AddCheckbox(0x81c, &g_options_values.render_options[7]);
     AddCheckbox(0x813, &g_options_values.render_options[1]);
+    AddDisplaySettings(); /* mod: display mode and resolution */
 }
 
 // FUNCTION: WIZ8 0x005a9ea0
@@ -1322,10 +1479,20 @@ void W8OptionsScreen::CreateControls()
     m_menu_selection->m_selectionListener = this;
     m_controls->SetEnabled(true);
     m_controls->EnableRegionSet(true);
+    /* Mod (wide windows): the left column - the computer and 8 buttons - at the left
+       canvas edge. Outside the layout the anchor has no effect. */
+    m_controls->SetLayoutAnchor(W8_ANCHOR_LEFT);
     m_controls->Invalidate(0);
     m_menu_set = new W8OptionsMenuSet(&g_options_page_region_set);
     m_menu_set->SetEnabled(true);
     m_menu_set->EnableRegionSet(true);
+    /* Mod (wide windows): page arrows at the ends of the stretched strip. */
+    if (m_menu_set->m_previous->m_region != -1) {
+        SetRegionLayoutAnchor(m_menu_set->m_previous->m_region, W8_ANCHOR_LEFT);
+    }
+    if (m_menu_set->m_next->m_region != -1) {
+        SetRegionLayoutAnchor(m_menu_set->m_next->m_region, W8_ANCHOR_RIGHT);
+    }
 }
 
 // FUNCTION: WIZ8 0x005a9200
@@ -1458,7 +1625,19 @@ void W8OptionsScreen::Redraw()
     if (m_redraw_pending) {
         ClearPrimarySurface();
         ClearSurfaceRect(0, 0, 640, 480);
-        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0xee, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
+        if (CanvasWideLayoutActive()) {
+            /* Mod (wide windows): left column at the left canvas edge, the whole
+               canvas marked for re-upload (the right panel is stretched to the right edge). */
+            {
+                CanvasDrawScope left_scope(W8_ANCHOR_LEFT);
+                DrawCatalogImage(FRAME_BUFFER, 0xee, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
+            }
+            CanvasOriginScope scope(0);
+            InvalidateRegion(0, 0, g_canvas_w, 0x1e0, 0);
+        } else {
+            DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0xee, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY,
+                                          0);
+        }
         m_redraw_pending = false;
     }
     if (m_selected_panel != -1) {
@@ -1703,6 +1882,7 @@ W8OptionsCheckbox* W8OptionsPanel::AddCheckbox(int label, int* value)
                                           g_W8TextBufferAlignTop | g_W8TextBufferAlignLeft, 4);
     m_text_buffers.Add(text);
     W8OptionsCheckbox* checkbox = new W8OptionsCheckbox(this, m_content_top, value);
+    AnchorOptionsWidget(checkbox, W8_ANCHOR_RIGHT); /* mod: checkbox at the right edge */
     m_content_top += 44;
     return checkbox;
 }
@@ -1718,6 +1898,7 @@ W8TextControl* W8OptionsPanel::AddChoiceButton(int label)
     W8TextControl* button = new W8TextControl(this, 0xffffffff, 0x151, m_content_top + 1, 0, 0,
                                               0xf1, 0, 4, 6, 5, 7, -1);
     button->AddLayoutFlags(g_W8TextControlLayoutLatchedImage | g_W8TextControlLayoutToggle);
+    AnchorOptionsWidget(button, W8_ANCHOR_RIGHT); /* mod: with its label at the right edge */
     m_content_top += 22;
     return button;
 }
@@ -1731,8 +1912,607 @@ W8OptionsSlider* W8OptionsPanel::AddSlider(int label, float* value, bool alterna
                                           g_W8TextBufferAlignTop | g_W8TextBufferAlignLeft, 4);
     m_text_buffers.Add(text);
     W8OptionsSlider* slider = new W8OptionsSlider(this, m_content_top, value, alternate);
+    AnchorOptionsWidget(slider, W8_ANCHOR_RIGHT); /* mod: slider at the right edge */
     m_content_top += 22;
     return slider;
+}
+
+/* Mod: a slider whose label is not from StringData.DAT (new settings). */
+W8OptionsSlider* W8OptionsPanel::AddSliderText(const wchar_t* label, float* value)
+{
+    W8ControlsRect bounds = {m_bounds.left + 20, m_bounds.top + m_content_top, m_bounds.right,
+                             m_bounds.top + m_content_top + 22};
+    W8TextBuffer* text = new W8TextBuffer(&bounds, const_cast<wchar_t*>(label), g_options_detail_font,
+                                          g_W8TextBufferAlignTop | g_W8TextBufferAlignLeft, 4);
+    m_text_buffers.Add(text);
+    W8OptionsSlider* slider = new W8OptionsSlider(this, m_content_top, value, false);
+    AnchorOptionsWidget(slider, W8_ANCHOR_RIGHT);
+    m_content_top += 22;
+    return slider;
+}
+
+W8TextControl* W8OptionsPanel::AddChoiceButtonText(const wchar_t* label)
+{
+    W8ControlsRect bounds = {m_bounds.left, m_bounds.top + m_content_top, m_bounds.left + 0x147,
+                             m_bounds.top + m_content_top + 22};
+    W8TextBuffer* text = new W8TextBuffer(&bounds, const_cast<wchar_t*>(label), g_options_detail_font,
+                                          g_W8TextBufferAlignTop | g_W8TextBufferAlignRight, 4);
+    m_text_buffers.Add(text);
+    W8TextControl* button = new W8TextControl(this, 0xffffffff, 0x151, m_content_top + 1, 0, 0,
+                                              0xf1, 0, 4, 6, 5, 7, -1);
+    button->AddLayoutFlags(g_W8TextControlLayoutLatchedImage | g_W8TextControlLayoutToggle);
+    AnchorOptionsWidget(button, W8_ANCHOR_RIGHT);
+    m_content_top += 22;
+    return button;
+}
+
+void W8OptionsPanel::AddChoicesText(const wchar_t* label, int count, const wchar_t* const* choices,
+                                    W8OptionsSelection* selection)
+{
+    W8ControlsRect bounds = {m_bounds.left + 20, m_bounds.top + m_content_top, m_bounds.right,
+                             m_bounds.top + m_content_top + 22};
+    W8TextBuffer* text = new W8TextBuffer(&bounds, const_cast<wchar_t*>(label), g_options_detail_font,
+                                          g_W8TextBufferAlignTop | g_W8TextBufferAlignLeft, 4);
+    m_text_buffers.Add(text);
+    m_option_selections.Add(selection);
+    for (int index = 0; index < count; ++index) {
+        selection->AddEntry(AddChoiceButtonText(choices[index]));
+    }
+    selection->SetSelected(*selection->m_value);
+    m_content_top += 22;
+}
+
+/* ---- Mod (2026-10-16): display mode and resolution instead of 3D Setup ----
+   Second "Video" page. The choice is written to wiz8wide.ini and applied immediately
+   (VideoApplyDisplaySettings) if the screen aspect ratio does not change; otherwise - from
+   the next launch (different canvas width), which a line under the setting says.
+   The resolution is chosen with the same selector as class and race in character
+   creation: arrows on the sides and a field that opens a list on click
+   (images CG_Buttons.sti / CG_Profession.sti, like W8CharacterStatsRow). */
+
+namespace {
+
+struct W8ScreenSize {
+    int width;
+    int height;
+};
+
+enum {
+    W8_SCREEN_SIZE_MAX = 24,
+    W8_DROPDOWN_ROWS = 10, /* how many rows the open list shows */
+    W8_DROPDOWN_X = 0xa5,  /* left edge of the selector in the panel (the arrow) */
+    W8_CG_BUTTONS = 0x10a, /* Char Generation\CG_Buttons.sti: arrows */
+    W8_CG_FIELD = 0x104    /* Char Generation\CG_Profession.sti: field and list rows */
+};
+
+int g_display_mode_value; /* what is selected in the mode group */
+int g_display_width;      /* selected resolution (window / full screen) */
+int g_display_height;
+W8ScreenSize g_screen_sizes[W8_SCREEN_SIZE_MAX]; /* 32-bit monitor modes, largest first */
+int g_screen_size_count;
+wchar_t g_resolution_text[32];
+wchar_t g_entry_texts[W8_DROPDOWN_ROWS][32];
+W8TextBuffer* g_display_note;
+
+struct W8ResolutionDropdown {
+    W8TextControl* decrement;
+    W8TextControl* value;
+    W8TextControl* increment;
+    W8TextControl* entries[W8_DROPDOWN_ROWS];
+    int entry_count;
+    bool open;
+    int list_top; /* list rows, 640-screen coordinates (without the edge shift) */
+    int list_bottom;
+    int list_left;
+    int list_right;
+    const W8OptionsPanel* owner; /* panel with the list (comparison only, never dereferenced) */
+};
+/* The last value saved in the ini - we go back to it if the monitor does not
+   support the selected full-screen mode. */
+int g_saved_mode;
+int g_saved_width;
+int g_saved_height;
+W8ResolutionDropdown g_dropdown;
+
+void FormatSize(wchar_t* out, int width, int height)
+{
+    /* "1920 x 1080" without _snwprintf (UCRT in the hybrid is not initialized) */
+    const int parts[2] = {width, height};
+    for (int part = 0; part < 2; ++part) {
+        wchar_t digits[12];
+        int count = 0;
+        int value = parts[part] > 0 ? parts[part] : 0;
+        do {
+            digits[count++] = static_cast<wchar_t>(L'0' + value % 10);
+            value /= 10;
+        } while (value > 0 && count < 11);
+        while (count > 0) {
+            *out++ = digits[--count];
+        }
+        if (part == 0) {
+            *out++ = L' ';
+            *out++ = L'x';
+            *out++ = L' ';
+        }
+    }
+    *out = L'\0';
+}
+
+void CollectScreenSizes(void)
+{
+    g_screen_size_count = 0;
+    int desktop_w;
+    int desktop_h;
+    DisplayDesktopSize(&desktop_w, &desktop_h); /* not a monitor mode in full screen */
+    DEVMODEA mode;
+    memset(&mode, 0, sizeof(mode));
+    mode.dmSize = sizeof(mode);
+    for (DWORD index = 0; EnumDisplaySettingsA(0, index, &mode); ++index) {
+        const int w = static_cast<int>(mode.dmPelsWidth);
+        const int h = static_cast<int>(mode.dmPelsHeight);
+        if (mode.dmBitsPerPel != 32 || w < 640 || h < 480 || w > desktop_w || h > desktop_h) {
+            continue;
+        }
+        bool known = false;
+        for (int k = 0; k < g_screen_size_count; ++k) {
+            known = known || (g_screen_sizes[k].width == w && g_screen_sizes[k].height == h);
+        }
+        if (known) {
+            continue;
+        }
+        /* insertion sorted by descending area; extra small ones drop off */
+        int at = g_screen_size_count < W8_SCREEN_SIZE_MAX ? g_screen_size_count : W8_SCREEN_SIZE_MAX;
+        while (at > 0 && g_screen_sizes[at - 1].width * g_screen_sizes[at - 1].height < w * h) {
+            if (at < W8_SCREEN_SIZE_MAX) {
+                g_screen_sizes[at] = g_screen_sizes[at - 1];
+            }
+            --at;
+        }
+        if (at < W8_SCREEN_SIZE_MAX) {
+            g_screen_sizes[at].width = w;
+            g_screen_sizes[at].height = h;
+            if (g_screen_size_count < W8_SCREEN_SIZE_MAX) {
+                ++g_screen_size_count;
+            }
+        }
+    }
+    if (g_screen_size_count == 0) {
+        g_screen_sizes[0].width = desktop_w;
+        g_screen_sizes[0].height = desktop_h;
+        g_screen_size_count = 1;
+    }
+}
+
+/* Which resolutions go into the open list (it has 10 rows, while a
+   monitor can have 20+ modes): the Windows resolution, the classic 4:3 ones for those who
+   want it as in the original, then the largest of the rest. The arrows
+   cycle through all modes. */
+int g_entry_size_index[W8_DROPDOWN_ROWS];
+
+int ChooseDropdownEntries(void)
+{
+    bool chosen[W8_SCREEN_SIZE_MAX] = {};
+    int count = 0;
+    int desktop_w;
+    int desktop_h;
+    DisplayDesktopSize(&desktop_w, &desktop_h);
+    const W8ScreenSize wanted[] = {{desktop_w, desktop_h},
+                                   {g_display_width, g_display_height}, /* currently selected */
+                                   {640, 480},   {800, 600},  {1024, 768},
+                                   {1280, 960},  {1600, 1200}};
+    for (int w = 0; w < static_cast<int>(sizeof(wanted) / sizeof(wanted[0])); ++w) {
+        for (int k = 0; k < g_screen_size_count && count < W8_DROPDOWN_ROWS; ++k) {
+            if (!chosen[k] && g_screen_sizes[k].width == wanted[w].width &&
+                g_screen_sizes[k].height == wanted[w].height) {
+                chosen[k] = true;
+                ++count;
+            }
+        }
+    }
+    for (int k = 0; k < g_screen_size_count && count < W8_DROPDOWN_ROWS; ++k) {
+        if (!chosen[k]) {
+            chosen[k] = true;
+            ++count;
+        }
+    }
+    int at = 0;
+    for (int k = 0; k < g_screen_size_count; ++k) {
+        if (chosen[k]) {
+            g_entry_size_index[at++] = k; /* in list order: from largest to smallest */
+        }
+    }
+    return at;
+}
+
+/* The current resolution is not among the monitor modes (entered in the ini by hand):
+   the arrow takes the nearest larger (larger) or smaller one by area. The list is from
+   largest to smallest. */
+int NearestSizeIndex(bool larger)
+{
+    const int area = g_display_width * g_display_height;
+    if (larger) {
+        for (int k = g_screen_size_count - 1; k >= 0; --k) {
+            if (g_screen_sizes[k].width * g_screen_sizes[k].height > area) {
+                return k;
+            }
+        }
+        return 0;
+    }
+    for (int k = 0; k < g_screen_size_count; ++k) {
+        if (g_screen_sizes[k].width * g_screen_sizes[k].height < area) {
+            return k;
+        }
+    }
+    return g_screen_size_count - 1;
+}
+
+int CurrentSizeIndex(void)
+{
+    for (int k = 0; k < g_screen_size_count; ++k) {
+        if (g_screen_sizes[k].width == g_display_width && g_screen_sizes[k].height == g_display_height) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+/* Redraw the whole screen, as after closing a dialog: for text of a new
+   length the old background is not erased, and redrawing a single panel loses the page
+   strip (it is drawn by m_menu_set); a closed list also has to be erased. */
+void RefreshOptionsScreen(void)
+{
+    W8OptionsScreen* screen = g_options_screen;
+    if (screen == 0) {
+        return;
+    }
+    screen->m_redraw_pending = true;
+    screen->m_controls->Invalidate(0);
+    if (screen->m_selected_panel != -1) {
+        W8OptionsPanelSet* panel_set = screen->m_panel[screen->m_selected_panel];
+        if (panel_set->m_active) {
+            (*panel_set->m_panels.GetAt(panel_set->m_current))->Invalidate(0);
+        }
+        screen->m_menu_set->Invalidate(0);
+    }
+}
+
+void UpdateDropdown(void)
+{
+    if (g_dropdown.value == 0) {
+        return;
+    }
+    const bool borderless = g_display_mode_value == W8_DISPLAY_BORDERLESS;
+    if (borderless) {
+        int desktop_w;
+        int desktop_h;
+        DisplayDesktopSize(&desktop_w, &desktop_h);
+        FormatSize(g_resolution_text, desktop_w, desktop_h);
+    } else {
+        FormatSize(g_resolution_text, g_display_width, g_display_height);
+    }
+    g_dropdown.value->m_textBuffer.SetText(g_resolution_text, g_options_detail_font);
+    g_dropdown.value->SetEnabled(!borderless);
+    g_dropdown.decrement->SetEnabled(!borderless);
+    g_dropdown.increment->SetEnabled(!borderless);
+}
+
+void SetDropdownOpen(bool open)
+{
+    g_dropdown.open = open;
+    for (int index = 0; index < g_dropdown.entry_count; ++index) {
+        g_dropdown.entries[index]->SetActive(open);
+        g_dropdown.entries[index]->SetEnabled(open);
+        /* the hover highlight must not survive closing the list */
+        g_dropdown.entries[index]->m_textBuffer.SetFontStateIndex(-1);
+    }
+}
+
+/* Save the choice and apply it: immediately if the aspect ratio is the same, otherwise show
+   that a restart is needed. */
+W8OptionsSelection* g_mode_selection; /* mode group on the page (owned by the panel) */
+
+const wchar_t* RestartNote(void)
+{
+    return LocalizedOr(L"Restart the game to apply.", L"Neustart erforderlich.",
+                       L"Red\x00e9marrez le jeu.", L"Нужен перезапуск игры.");
+}
+
+void SetDisplayNote(const wchar_t* text)
+{
+    if (g_display_note != 0) {
+        g_display_note->SetText(const_cast<wchar_t*>(text), g_options_detail_font);
+    }
+}
+
+void ApplyDisplaySelection(void)
+{
+    /* Full screen: first ask the device whether the monitor supports
+       this mode, and only then save - otherwise the next launch will not
+       open. Not supported - revert to the previous choice. */
+    if (g_display_mode_value == W8_DISPLAY_FULLSCREEN &&
+        !VideoFullscreenSizeSupported(g_display_width, g_display_height)) {
+        g_display_mode_value = g_saved_mode;
+        g_display_width = g_saved_width;
+        g_display_height = g_saved_height;
+        if (g_mode_selection != 0) {
+            g_mode_selection->SetSelected(g_saved_mode);
+        }
+        SetDisplayNote(LocalizedOr(L"Not supported by the monitor.", L"Vom Monitor nicht unterst\x00fctzt.",
+                                   L"Non pris en charge par l'\x00e9" L"cran.",
+                                   L"Монитор не поддерживает этот режим."));
+        UpdateDropdown();
+        RefreshOptionsScreen();
+        return;
+    }
+    DisplaySaveSettings(g_display_mode_value, g_display_width, g_display_height);
+    g_saved_mode = g_display_mode_value;
+    g_saved_width = g_display_width;
+    g_saved_height = g_display_height;
+    const bool applied = VideoApplyDisplaySettings();
+    SetDisplayNote(applied ? &g_empty_wide_string : RestartNote());
+    UpdateDropdown();
+    RefreshOptionsScreen();
+}
+
+void SelectSize(int index)
+{
+    if (index < 0 || index >= g_screen_size_count) {
+        return;
+    }
+    g_display_width = g_screen_sizes[index].width;
+    g_display_height = g_screen_sizes[index].height;
+    ApplyDisplaySelection();
+}
+
+/* Open list row: hover highlight, as in character creation. */
+class W8DropdownEntry : public W8TextControl {
+public:
+    W8DropdownEntry(Controls* owner, int left, int top, int height, int sprite, int text_offset)
+        : W8TextControl(owner, 0xffffffff, left, top, left + 0x7e, top + height, W8_CG_FIELD, 0,
+                        sprite, sprite, sprite, sprite, sprite)
+    {
+        AddLayoutFlags(g_W8TextControlLayoutImageAtOrigin);
+        m_textBuffer.SetLayoutMode(g_W8TextBufferAlignMiddle | g_W8TextBufferAlignCenter);
+        m_pressedTextOffset = 0;
+        UpdateTextBounds(left + 4, top + text_offset, left + 0x7a, top + text_offset + 0x16);
+    }
+    /* When shown, the panel enables all its children, so a closed list
+       simply is not drawn and does not react (see g_dropdown.open). */
+    virtual void Redraw(bool full_redraw) override
+    {
+        if (g_dropdown.open) {
+            W8TextControl::Redraw(full_redraw);
+        }
+    }
+    virtual void OnMouseEnter(int event) override
+    {
+        if (!g_dropdown.open) {
+            return;
+        }
+        W8TextControl::OnMouseEnter(event);
+        if (m_active && m_enabled) {
+            m_textBuffer.SetFontStateIndex(0xd);
+            Invalidate(false);
+        }
+    }
+    virtual void OnMouseLeave(int event) override
+    {
+        W8TextControl::OnMouseLeave(event);
+        if (m_active && g_dropdown.open) {
+            m_textBuffer.SetFontStateIndex(-1);
+            Invalidate(false);
+        }
+    }
+};
+
+class W8DropdownListener : public W8TextControl::Listener {
+public:
+    virtual void OnPrimary(W8TextControl* control) override
+    {
+        if (g_display_mode_value == W8_DISPLAY_BORDERLESS) {
+            return;
+        }
+        const int current = CurrentSizeIndex();
+        if (!g_dropdown.open && control != g_dropdown.value && control != g_dropdown.increment &&
+            control != g_dropdown.decrement) {
+            return; /* click on an invisible row of a closed list */
+        }
+        if (control == g_dropdown.value) {
+            SetDropdownOpen(!g_dropdown.open);
+            RefreshOptionsScreen();
+            return;
+        }
+        if (g_dropdown.open) {
+            SetDropdownOpen(false);
+        }
+        if (control == g_dropdown.increment) {
+            /* right - larger (the list goes from largest to smallest) */
+            SelectSize(current < 0 ? NearestSizeIndex(true) : (current == 0 ? 0 : current - 1));
+            return;
+        }
+        if (control == g_dropdown.decrement) {
+            SelectSize(current < 0 ? NearestSizeIndex(false)
+                                   : (current + 1 < g_screen_size_count ? current + 1 : current));
+            return;
+        }
+        for (int index = 0; index < g_dropdown.entry_count; ++index) {
+            if (control == g_dropdown.entries[index]) {
+                control->OnMouseLeave(0);
+                SelectSize(g_entry_size_index[index]);
+                return;
+            }
+        }
+    }
+};
+W8DropdownListener g_dropdown_listener;
+
+class W8DisplayModeSelection : public W8OptionsSelection {
+public:
+    W8DisplayModeSelection() : W8OptionsSelection(&g_display_mode_value) {}
+    virtual void OnPrimary(W8TextControl* control) override
+    {
+        W8OptionsSelection::OnPrimary(control);
+        if (g_dropdown.open) {
+            SetDropdownOpen(false);
+        }
+        ApplyDisplaySelection();
+    }
+};
+
+} // namespace
+
+/* Panels deleted (leaving the settings): forget the pointers to their children, otherwise
+   a new panel at the old address could match g_dropdown.owner. */
+static void ResetDisplaySettingsUi(void)
+{
+    memset(&g_dropdown, 0, sizeof(g_dropdown));
+    g_display_note = 0;
+    g_mode_selection = 0;
+    g_view_distance_slider = 0;
+}
+
+bool OptionsDropdownCoversText(const W8OptionsPanel* panel, const W8TextBuffer* text)
+{
+    if (panel != g_dropdown.owner) {
+        return false; /* the list lives only on its own panel */
+    }
+    /* labels are drawn over the panel's children: while the list is open, those that
+       overlap its rows are not drawn */
+    if (!g_dropdown.open) {
+        return false;
+    }
+    const W8ControlsRect& bounds = text->GetLayoutBounds();
+    if (bounds.bottom <= g_dropdown.list_top || bounds.top >= g_dropdown.list_bottom) {
+        return false;
+    }
+    /* horizontally - the text itself (row width), taking canvas edges into account:
+       labels on the left at the left edge, the list - at the right */
+    int width = static_cast<int>(text->m_maxLineWidth);
+    if (width <= 0) {
+        width = bounds.right - bounds.left; /* not laid out yet - the whole rectangle */
+    }
+    const bool right_aligned = (text->GetLayoutMode() & g_W8TextBufferAlignRight) != 0;
+    int left = right_aligned ? bounds.right - width : bounds.left;
+    int right = right_aligned ? bounds.right : bounds.left + width;
+    const int shift = CanvasAnchorShift(OptionsTextAnchor(text));
+    left += shift;
+    right += shift;
+    const int list_shift = CanvasAnchorShift(W8_ANCHOR_RIGHT);
+    return right > g_dropdown.list_left + list_shift && left < g_dropdown.list_right + list_shift;
+}
+
+void W8OptionsPanel::AddDisplaySettings(void)
+{
+    DisplayPendingSettings(&g_display_mode_value, &g_display_width, &g_display_height);
+    CollectScreenSizes();
+    memset(&g_dropdown, 0, sizeof(g_dropdown));
+    g_dropdown.owner = this;
+    g_saved_mode = g_display_mode_value;
+    g_saved_width = g_display_width;
+    g_saved_height = g_display_height;
+    m_content_top += 22;
+    static const wchar_t* const en[] = {L"Borderless window", L"Fullscreen", L"Window"};
+    static const wchar_t* const ru[] = {L"Окно без рамки", L"Полный экран", L"Окно"};
+    static const wchar_t* const de[] = {L"Randloses Fenster", L"Vollbild", L"Fenster"};
+    static const wchar_t* const fr[] = {L"Fen\x00eatre sans bordure", L"Plein \x00e9" L"cran",
+                                        L"Fen\x00eatre"};
+    const wchar_t* choices[3];
+    for (int index = 0; index < 3; ++index) {
+        choices[index] = LocalizedOr(en[index], de[index], fr[index], ru[index]);
+    }
+    AddChoicesText(LocalizedOr(L"Display mode", L"Anzeigemodus", L"Mode d'affichage",
+                               L"Режим экрана"),
+                   3, choices, g_mode_selection = new W8DisplayModeSelection);
+
+    /* resolution: label on the left, selector "◄ [field] ►" at the right edge */
+    const int top = m_content_top;
+    W8ControlsRect bounds = {m_bounds.left + 20, m_bounds.top + top + 1, m_bounds.right,
+                             m_bounds.top + top + 23};
+    W8TextBuffer* label = new W8TextBuffer(
+        &bounds,
+        const_cast<wchar_t*>(LocalizedOr(L"Resolution", L"Aufl\x00f6sung", L"R\x00e9solution",
+                                         L"Разрешение")),
+        g_options_detail_font, g_W8TextBufferAlignTop | g_W8TextBufferAlignLeft, 4);
+    m_text_buffers.Add(label);
+    const int x = W8_DROPDOWN_X;
+    g_dropdown.decrement =
+        new W8TextControl(this, 0xffffffff, x + 1, top, 0, 0, W8_CG_BUTTONS, 0, 0, 2, 1, 4, 3);
+    g_dropdown.value =
+        new W8TextControl(this, 0xffffffff, x + 0x1c, top + 1, 0, 0, W8_CG_FIELD, 0, 1, 1, 2, 2, 3);
+    g_dropdown.value->m_textBuffer.SetLayoutMode(g_W8TextBufferAlignMiddle | g_W8TextBufferAlignCenter);
+    g_dropdown.value->m_pressedTextOffset = 0;
+    g_dropdown.value->UpdateTextBounds(x + 0x1c + 4, top + 1, x + 0x1c + 0x6e, top + 1 + 0x16);
+    g_dropdown.increment =
+        new W8TextControl(this, 0xffffffff, x + 0x9f, top, 0, 0, W8_CG_BUTTONS, 0, 5, 7, 6, 9, 8);
+    W8TextControl* row[3] = {g_dropdown.decrement, g_dropdown.value, g_dropdown.increment};
+    for (int index = 0; index < 3; ++index) {
+        row[index]->m_listener = &g_dropdown_listener;
+        AnchorOptionsWidget(row[index], W8_ANCHOR_RIGHT);
+        row[index]->SetActive(true);
+    }
+
+    /* open list: above the field, the bottom row right against the field */
+    g_dropdown.entry_count = ChooseDropdownEntries();
+    const int n = g_dropdown.entry_count;
+    const int list_height = n == 1 ? 0x18 : 0x18 * 2 + (n - 2) * 0x16;
+    const int list_top = top + 1 - list_height;
+    for (int index = 0; index < n; ++index) {
+        int sprite;
+        int entry_top;
+        int height;
+        int text_offset;
+        if (index == 0) {
+            sprite = 4; /* top row with the frame */
+            entry_top = list_top;
+            height = 0x18;
+            text_offset = 2;
+        } else if (index == n - 1) {
+            sprite = 6; /* bottom one */
+            entry_top = list_top + 2 + index * 0x16;
+            height = 0x18;
+            text_offset = 0;
+        } else {
+            sprite = 5;
+            entry_top = list_top + 2 + index * 0x16;
+            height = 0x16;
+            text_offset = 0;
+        }
+        W8DropdownEntry* entry =
+            new W8DropdownEntry(this, x + 0x1c, entry_top, height, sprite, text_offset);
+        const W8ScreenSize& size = g_screen_sizes[g_entry_size_index[index]];
+        FormatSize(g_entry_texts[index], size.width, size.height);
+        entry->m_textBuffer.SetText(g_entry_texts[index], g_options_detail_font);
+        entry->m_listener = &g_dropdown_listener;
+        AnchorOptionsWidget(entry, W8_ANCHOR_RIGHT);
+        g_dropdown.entries[index] = entry;
+    }
+    g_dropdown.list_top = m_bounds.top + list_top;
+    g_dropdown.list_bottom = m_bounds.top + top + 1;
+    g_dropdown.list_left = m_bounds.left + x + 0x1c;
+    g_dropdown.list_right = m_bounds.left + x + 0x1c + 0x7e;
+    SetDropdownOpen(false);
+    UpdateDropdown();
+    m_content_top += 30;
+
+    /* "restart needed" - only when the screen aspect ratio changed */
+    W8ControlsRect note_bounds = {m_bounds.left + 20, m_bounds.top + m_content_top, m_bounds.right,
+                                  m_bounds.top + m_content_top + 22};
+    g_display_note = new W8TextBuffer(&note_bounds, &g_empty_wide_string, g_options_detail_font,
+                                      g_W8TextBufferAlignTop | g_W8TextBufferAlignLeft, 4);
+    m_text_buffers.Add(g_display_note);
+    /* a choice waiting for a restart (different aspect ratio) - also after reopening
+       the settings */
+    {
+        int pending_w = g_display_width;
+        int pending_h = g_display_height;
+        if (g_display_mode_value == W8_DISPLAY_BORDERLESS) {
+            DisplayDesktopSize(&pending_w, &pending_h);
+        }
+        if (CanvasWidthForOutput(pending_w, pending_h) != g_canvas_w) {
+            SetDisplayNote(RestartNote());
+        }
+    }
+    m_content_top += 22;
 }
 
 // FUNCTION: WIZ8 0x005a8980
@@ -1777,7 +2557,12 @@ void W8OptionsPanel::Redraw()
     Controls::Redraw();
     if (redraw_text) {
         for (int index = 0; index < m_text_buffers.GetCount(); ++index) {
-            (*m_text_buffers.GetAt(index))->RenderToTarget(0, true, FRAME_BUFFER);
+            W8TextBuffer* text = *m_text_buffers.GetAt(index);
+            if (OptionsDropdownCoversText(this, text)) {
+                continue; /* mod: under the open resolution list */
+            }
+            CanvasDrawScope text_scope(OptionsTextAnchor(text)); /* mod: canvas edge */
+            text->RenderToTarget(0, true, FRAME_BUFFER);
         }
     }
 }
@@ -1804,6 +2589,12 @@ W8OptionsPanel::W8OptionsPanel(int region_index)
     GetCatalogImageSize(0xf2, 0, 0, &width, &height);
     m_bounds.right = m_bounds.left + static_cast<unsigned short>(width);
     m_bounds.bottom = m_bounds.top + static_cast<unsigned short>(height);
+    /* Mod (wide windows): the right panel background (options or save frame)
+       is stretched from the left column to the right canvas edge by repeating a piece
+       (s_subscreen_art_cuts in MainGameLayout.cpp). The contents are laid out
+       over it by child anchors (AnchorOptionsWidget, top of the file). Outside the
+       canvas layout m_wideMode has no effect. */
+    m_wideMode = W8_PANEL_WIDE_STRETCH;
 }
 
 /* The menu set builds itself from the shared options font: its panel bounds
@@ -1830,6 +2621,10 @@ W8OptionsMenuSet::W8OptionsMenuSet(unsigned int* shared_region_set)
 
     m_page_text = new W8TextBuffer(&m_bounds, &g_empty_wide_string, g_options_detail_font,
                                    g_W8TextBufferAlignCenter | g_W8TextBufferAlignMiddle, 4);
+    /* Mod (wide windows): the page strip is stretched together with the panel (covers
+       its niche entirely), the arrows move to its ends (region anchors
+       are set by W8OptionsScreen::CreateControls), the page number is centered. */
+    m_wideMode = W8_PANEL_WIDE_STRETCH;
 }
 
 /* The menu-set table has its own deleting destructor; the normal destructor
@@ -1985,6 +2780,11 @@ unsigned char OptionsScreenLeave(int)
         delete screen;
     }
     g_options_screen = 0;
+    ResetDisplaySettingsUi(); /* mod: panels deleted */
+    /* Mod (wide windows): turn the canvas layout off (the strips are erased). */
+    if (CanvasWideLayoutActive()) {
+        CanvasSetWideLayout(false);
+    }
     NoOp();
     MSYS_Shutdown();
     ResetRegions();
@@ -2025,6 +2825,10 @@ unsigned char OptionsScreenEnter()
     SetPrimarySurfaceTextureHint2Enabled(false);
     MSYS_Init();
     ResetRegions();
+    /* Mod (wide windows): the options window covers the whole canvas (see canvas.h). */
+    if (g_canvas_ox > 0 && CanvasWideWindowsEnabled()) {
+        CanvasSetWideLayout(true);
+    }
     UpdateHeldItemCursor();
     SetFontObjectPalette16BPP(g_wiz_text_font_secondary, g_wiz_text_font_secondary_palette);
     g_options_values.applying = 0;

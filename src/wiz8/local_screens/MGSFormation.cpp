@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/fonts.h"
 #include "wiz8/local_screens/MGSFormation.h"
 
@@ -121,6 +122,8 @@ void RefreshFormationBoard(void)
     }
     MakeVSurfaceFromVObject(video_object, 0, &compass_image);
     DrawFormationSlotMarkers(board_image);
+    /* Wide canvas layout A: the formation board sits at the right canvas edge. */
+    CanvasDrawScope layout_scope(W8_ANCHOR_RIGHT);
     g_level_block->formation_compass_sprite = CreateSpriteFromSurface(compass_image, 0, 1, 0, 1);
     Position2DNodeUnsnapped(g_level_block->formation_compass_sprite, 0x207, 0x167);
     SetModelInstance2DDisplayState(g_level_block->formation_compass_sprite, 4);
@@ -149,6 +152,7 @@ void CreateFormationBoardOverlay(void)
 
     if (g_level_block->formation_overlay_sprite == 0 &&
         g_level_block->formation_board_sprite != 0) {
+        CanvasDrawScope layout_scope(W8_ANCHOR_RIGHT); /* layout A: right canvas edge */
         bounds.left = 0x200;
         bounds.top = 0x166;
         bounds.right = 0x269;
@@ -209,10 +213,11 @@ unsigned char FormationBoardHoverRegionEvent(const InputAtom*, W8Region* region)
             continue;
         }
         cell = position->bQuadrant * 3 + position->bQuadrantSlot;
-        if (IsCursorInRectangle(g_formation_marker_offsets[cell].x + 0x207,
-                                g_formation_marker_offsets[cell].y + 0x167,
-                                g_formation_marker_offsets[cell].x + 0x211,
-                                g_formation_marker_offsets[cell].y + 0x171)) {
+        /* Wide canvas layout A: the board is right-anchored. */
+        if (IsCursorInAnchoredRectangle(W8_ANCHOR_RIGHT, g_formation_marker_offsets[cell].x + 0x207,
+                                        g_formation_marker_offsets[cell].y + 0x167,
+                                        g_formation_marker_offsets[cell].x + 0x211,
+                                        g_formation_marker_offsets[cell].y + 0x171)) {
             hit = slot;
             break;
         }

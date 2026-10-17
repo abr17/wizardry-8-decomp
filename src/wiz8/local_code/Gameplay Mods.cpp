@@ -209,12 +209,14 @@ void ApplyPartyEffectSlots(const W8EffectSlot* source, W8GameplayModifierBlock* 
 
             switch (slot->effect_id) {
             case 0x14:
-                adjusted = static_cast<unsigned char>((slot->amount + 1) / 2);
+                /* Retail 0x0050EE07: halves only the low byte, ((amount & 0xff) + 1) / 2. */
+                adjusted = static_cast<unsigned char>((amount + 1) / 2);
                 AdjustByteByPercent(&adjusted, percent);
                 target->hit_bonus += adjusted;
                 break;
             case 0x20:
-                adjusted = static_cast<unsigned char>((slot->amount + 1) / 2);
+                /* Retail 0x0050EE39: halves only the low byte, ((amount & 0xff) + 1) / 2. */
+                adjusted = static_cast<unsigned char>((amount + 1) / 2);
                 AdjustByteByPercent(&adjusted, percent);
                 target->armor_matchup += adjusted;
                 break;

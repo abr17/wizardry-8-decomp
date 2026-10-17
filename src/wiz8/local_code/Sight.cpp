@@ -83,7 +83,12 @@ void ResetSight(void)
 // FUNCTION: WIZ8 0x00504910
 bool IsSightRangeOverridden(void)
 {
-    return GetViewDistance() != g_sight_default;
+    float view_distance = GetViewDistance();
+
+    /* Retail 0x00504915: fcomp / test ah,0x40 - C3 is set for equal and for an
+       unordered compare, so a NaN view distance counts as "not overridden"
+       (found by the w8diff harness). */
+    return view_distance < g_sight_default || view_distance > g_sight_default;
 }
 
 /* Re-run both directions of the sight update for one monster. */
@@ -152,7 +157,10 @@ bool CanMonsterSeeMonster(W8MonsterInfo* source, W8MonsterInfo* target, W8Visibi
     unsigned char ranged_bonus;
     float threshold;
 
-    if (source->hp_current == 0 || source->highest_condition >= W8_CONDITION_ASLEEP) {
+    /* Retail 0x005058b6: cmp [esi+0x107],0xf / jae - an unsigned compare, so a
+       negative condition is "too far gone" too (found by the w8diff harness). */
+    if (source->hp_current == 0 ||
+        static_cast<unsigned int>(source->highest_condition) >= W8_CONDITION_ASLEEP) {
         return false;
     }
     target_record = GetMonsterDataForInfo(target);
@@ -186,7 +194,9 @@ bool CanMonsterSeeMonster(W8MonsterInfo* source, W8MonsterInfo* target, W8Visibi
         static_cast<unsigned char>(source_record->kind == 12),
         static_cast<int>(target_record->effective_level), penalty_modifier,
         static_cast<int>(record->sight_state), 0, distance);
-    if (threshold < distance) {
+    /* Retail 0x00505a19: fcomp / test ah,1 (C0) - also "cannot see" when the compare
+       is unordered, so the condition is written to make NaN return false. */
+    if (!(threshold >= distance)) {
         return false;
     }
     return true;
@@ -211,7 +221,11 @@ float ComputeSightThreshold(srVector3T<float> observer_position, srVector3T<floa
     world = GetWorld();
     far_clip = WorldGetFarClip(world);
     viewing_distance = static_cast<float>(far_clip);
-    if (viewing_distance <= g_float_zero) {
+    /* Retail 0x00505a4e/0x00505a52: fst stores the float, fcomp tests the unrounded
+       double still on the x87 stack with test ah,0x41 - a far clip that rounds to
+       a float 0 (1e-50) does not assert, a NaN one does (found by the w8diff
+       harness). */
+    if (!(far_clip > g_float_zero)) {
         srAssertFail("flViewingDistance > 0", SIGHT_CPP, 0x30c, 0);
     }
     heading = GetHeadingAngle(&observer_position, &target_position);
@@ -219,14 +233,29 @@ float ComputeSightThreshold(srVector3T<float> observer_position, srVector3T<floa
     if (blinded && !extended_sight_active) {
         return g_float_zero;
     }
-    if (angle_delta < static_cast<float>(g_monster_facing_tolerance) || sight_override != 0 ||
-        skip_field_of_view != 0 || distance == g_float_zero) {
+    /* Retail 0x00505a9e/0x00505aef: fcomp against the double tolerance with test ah,1,
+       and distance vs 0 with test ah,0x40 - a NaN angle or NaN distance also takes
+       the 100% branch, so both conditions are written to be true on NaN. */
+    if (!(angle_delta >= g_monster_facing_tolerance) || sight_override != 0 ||
+        skip_field_of_view != 0 || !(distance < g_float_zero || distance > g_float_zero)) {
         sight_percent = 100;
     } else {
-        float sight_factor =
-            static_cast<float>(static_cast<int>(perception_attribute) - penalty_source * 2);
-        float sight_ratio = (viewing_distance - distance) / distance;
-        sight_percent = static_cast<int>(sight_factor * sight_ratio);
+        /* Retail 0x00505af4..0x00505b1b: the factor is UNSIGNED (fild qword, high dword 0),
+           so perception < 2*penalty_source wraps to ~2^32. x87 (53-bit) computes
+           (factor*(vd-d))/d, and _ftol truncates to int64 and keeps the low 32 bits;
+           out of range fistp gives 0x8000000000000000, whose low dword is 0. */
+        unsigned int sight_factor =
+            perception_attribute - static_cast<unsigned int>(penalty_source * 2);
+        double scaled = static_cast<double>(sight_factor) *
+                        (static_cast<double>(viewing_distance) - static_cast<double>(distance)) /
+                        static_cast<double>(distance);
+
+        if (scaled > -9223372036854775808.0 && scaled < 9223372036854775808.0) {
+            sight_percent =
+                static_cast<int>(static_cast<unsigned int>(static_cast<long long>(scaled)));
+        } else {
+            sight_percent = 0;
+        }
     }
     if (penalty_modifier != 0) {
         if (skip_field_of_view == 0) {
@@ -234,10 +263,15 @@ float ComputeSightThreshold(srVector3T<float> observer_position, srVector3T<floa
         } else {
             penalty = penalty_modifier * -5;
         }
-        sight_percent += penalty;
+        /* Retail 0x00505b40: plain 32-bit add, wraps. */
+        sight_percent = static_cast<int>(static_cast<unsigned int>(sight_percent) +
+                                         static_cast<unsigned int>(penalty));
     }
     if (ranged_bonus != 0) {
-        sight_percent = (static_cast<int>(ranged_bonus) + 100) * sight_percent / 100;
+        /* Retail 0x00505b64: imul keeps the low 32 bits, then signed /100 toward zero. */
+        sight_percent = static_cast<int>((static_cast<unsigned int>(ranged_bonus) + 100u) *
+                                         static_cast<unsigned int>(sight_percent)) /
+                        100;
     }
     ClampInteger(&sight_percent, 2, 100);
     return sight_percent * viewing_distance * g_movement_speed_step;
@@ -310,8 +344,11 @@ bool MonsterGroupHasVisibleThreat(W8MonsterGroup* group)
 
     for (index = 0; index < ILLength(group->monsters); ++index) {
         monster_info = MonsterInfoFromID(1120, SIGHT_CPP, IListGetAt(group->monsters, index), true);
+        /* Retail 0x00505ef4: cmp [esi+0x107],0xc / jae - unsigned, a negative
+           condition does not count (found by the w8diff harness). */
         if (monster_info->fActive && !monster_info->p3D->IsDying() &&
-            monster_info->hp_current != 0 && monster_info->highest_condition < W8_CONDITION_BLIND &&
+            monster_info->hp_current != 0 &&
+            static_cast<unsigned int>(monster_info->highest_condition) < W8_CONDITION_BLIND &&
             monster_info->party_threat.sight_state == W8_SIGHT_SEEN) {
             return true;
         }
@@ -319,18 +356,32 @@ bool MonsterGroupHasVisibleThreat(W8MonsterGroup* group)
     return false;
 }
 
+/* The two origin flags are bytes retail tests with test/setne (0x00505e6c,
+   0x00505e8c, 0x00505e16, 0x00505e2f): any nonzero byte counts as one. The
+   byte is read as a byte so a non-canonical value (2, 0x80, 0xff) is folded
+   to 1 the same way instead of being used raw as a bool (found by the w8diff
+   harness). */
+static unsigned int SightOriginFlag(const bool& flag)
+{
+    /* volatile: through memcpy MSVC still assumed a bool byte is 0/1 and folded
+       the test away elsewhere (GetRandomPartySlots turned "? 2 : 0" into "* 2"). */
+    // reinterpret-ok: the raw argument byte, which is what retail's test/setne sees
+    unsigned char raw = *reinterpret_cast<const volatile unsigned char*>(&flag);
+    return raw != 0 ? 1u : 0u;
+}
+
 /* Whether projectile visibility uses the separate launch origin. */
 // FUNCTION: WIZ8 0x00505e60
 bool MonsterHasProjectileOrigin(const W8MonsterInfo* monster)
 {
-    return monster->has_projectile_origin;
+    return SightOriginFlag(monster->has_projectile_origin) != 0;
 }
 
 /* Spell visibility occupies entry two or three, depending on launch origin. */
 // FUNCTION: WIZ8 0x00505e80
 char GetMonsterSpellSightIndex(const W8MonsterInfo* monster)
 {
-    return (monster->has_spell_origin) + 2;
+    return static_cast<char>(SightOriginFlag(monster->has_spell_origin) + 2);
 }
 
 /* Read one flag out of a visibility record. Two of the seven kinds are pairs
@@ -352,9 +403,9 @@ bool IsVisibleUnderConditions(const W8MonsterInfo* monster, const W8VisibilityRe
     case 3:
         return row->los_flags[2];
     case 4:
-        return row->los_flags[monster->has_projectile_origin];
+        return row->los_flags[SightOriginFlag(monster->has_projectile_origin)];
     case 5:
-        return row->los_flags[2 + (monster->has_spell_origin)];
+        return row->los_flags[2 + SightOriginFlag(monster->has_spell_origin)];
     default:
         return row->line_of_sight;
     }
@@ -378,7 +429,9 @@ unsigned int AgeAllMonsterSight(void)
     }
     for (index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
         monster_info = MonsterGetScriptPartByLocationIndex(index);
-        if (monster_info->highest_condition < W8_CONDITION_DEAD) {
+        /* Retail 0x00504996: cmp ecx,0x12 / jae - unsigned, a negative condition
+           is skipped like a dead one (found by the w8diff harness). */
+        if (static_cast<unsigned int>(monster_info->highest_condition) < W8_CONDITION_DEAD) {
             AgeMonsterSight(monster_info, steps, 1);
         }
     }
@@ -467,9 +520,16 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
         monster_info->hp_current == 0) {
         return;
     }
-    viewing_distance = static_cast<float>(WorldGetFarClip(GetWorld()));
-    if (viewing_distance <= g_float_zero) {
-        srAssertFail("flViewingDistance > 0", SIGHT_CPP, 0x5e, 0);
+    {
+        double far_clip = WorldGetFarClip(GetWorld());
+
+        viewing_distance = static_cast<float>(far_clip);
+        /* Retail 0x005049fa/0x005049fe: the float is stored, the unrounded double is
+           compared (test ah,0x41) - 1e-50 does not assert, NaN does (found by the
+           w8diff harness). */
+        if (!(far_clip > g_float_zero)) {
+            srAssertFail("flViewingDistance > 0", SIGHT_CPP, 0x5e, 0);
+        }
     }
     record = GetMonsterDataForInfo(monster_info);
     monster = monster_info->p3D;
@@ -525,7 +585,9 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
                     bool can_see = false;
 
                     distance = monster->GetDistanceToMonster(other->p3D);
-                    if (viewing_distance >= distance) {
+                    /* Retail 0x00505593: test ah,0x41 - skipped only when distance >
+                       viewing distance, so a NaN distance still goes on to the LOS test. */
+                    if (!(distance > viewing_distance)) {
                         bool line_of_sight = monster->HasLineOfSightToMonster(other_monster);
 
                         entry->line_of_sight = line_of_sight;
@@ -537,8 +599,10 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
                     if (can_see) {
                         entry->sight_state = W8_SIGHT_SEEN;
                         entry->last_seen_clock = g_status.world_clock;
-                        entry->subject_position = own_position;
-                        entry->target_position = other_position;
+                        /* Retail 0x005055c1..0x005055f9: own eye position goes to +0x1c,
+                           the other monster's to +0x10, as in the player record. */
+                        entry->target_position = own_position;
+                        entry->subject_position = other_position;
                     } else if (entry->last_seen_clock == 0) {
                         entry->sight_state = W8_SIGHT_UNSEEN;
                     } else {
@@ -592,47 +656,43 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
     GetCameraPosition(&camera_position);
     {
         float distance = monster->GetDistanceToPlayer();
-        bool visible_to_player;
+        bool visible_to_player = false;
 
-        monster_info->within_viewing_distance = distance <= viewing_distance;
+        /* Retail 0x00504a84: fcomp / test ah,0x41 - within unless distance > viewing
+           distance, so a NaN distance counts as within. */
+        monster_info->within_viewing_distance = !(distance > viewing_distance);
         monster_info->player_visibility.can_see = false;
         monster_info->player_visibility.line_of_sight = false;
-        if (viewing_distance < distance) {
-            if (monster_info->player_visibility.last_seen_clock == 0) {
-                monster_info->player_visibility.sight_state = W8_SIGHT_UNSEEN;
-            } else {
-                monster_info->player_visibility.sight_state = static_cast<unsigned char>(
-                    (0xf0U <
-                     static_cast<unsigned int>(g_status.world_clock -
-                                               monster_info->player_visibility.last_seen_clock))
-                        ? W8_SIGHT_UNSEEN
-                        : W8_SIGHT_RECENT);
-            }
-        } else {
+        if (monster_info->within_viewing_distance) {
             monster_info->player_visibility.line_of_sight = monster->CheckLineOfSightToPlayer();
         }
         if (monster_info->player_visibility.line_of_sight) {
+            /* Retail 0x00504ad4: cmp [ebp+0x107],0xf / jae - unsigned (found by the
+               w8diff harness alongside CanMonsterSeeMonster). */
             if (monster_info->hp_current == 0 ||
-                monster_info->highest_condition > W8_CONDITION_WEBBED) {
+                static_cast<unsigned int>(monster_info->highest_condition) > W8_CONDITION_WEBBED) {
                 visible_to_player = false;
             } else {
                 float yaw = monster->GetYaw();
-                unsigned int sight_override;
+                unsigned int penalty_modifier;
                 unsigned int minimum_level = 9999;
                 unsigned char fade_flag;
                 float player_distance;
 
+                /* Retail 0x00504b3c: mov cl,[0x68749b] - party_modifiers +0x48 (effect
+                   0x21 value), not the +0x4a sight_override flag the party loop uses. */
                 if (!gXStatus.fCombatMode) {
-                    sight_override = g_status.party_modifiers.sight_override;
+                    penalty_modifier = g_status.party_modifiers.value;
                 } else {
-                    sight_override = 0;
+                    penalty_modifier = 0;
                 }
+                /* Retail 0x00504b6c: only fOccupied and hp_current are checked here;
+                   conditions do not exclude a member from the minimum level. */
                 for (int slot = 0; slot < W8_PARTY_SLOT_COUNT; ++slot) {
                     W8PartySlotRow* row = &g_status.buffers.XChar[slot];
                     W8Character* character = &g_status.buffers.Char[slot];
 
                     if (row->fOccupied && character->hp_current != 0 &&
-                        character->highest_condition < W8_CONDITION_ASLEEP &&
                         character->uiExpLevel < minimum_level) {
                         minimum_level = character->uiExpLevel;
                     }
@@ -640,9 +700,10 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
 
                 player_distance = monster->GetDistanceToPlayer();
                 if (record->kind == 4) {
-                    int bonus = record->effective_level * 5;
+                    /* Retail 0x00504bad: 8-bit imul (wraps), then unsigned clamp to 0x7d. */
+                    unsigned char bonus = static_cast<unsigned char>(record->effective_level * 5);
 
-                    fade_flag = static_cast<unsigned char>(bonus > 0x7d ? 0x7d : bonus);
+                    fade_flag = bonus > 0x7d ? 0x7d : bonus;
                 } else {
                     fade_flag = 0;
                 }
@@ -655,18 +716,28 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
                     observer_position, target_position, yaw,
                     monster_info->attributes[W8_MONSTER_ATTRIBUTE_SENSES], fade_flag,
                     monster_info->uiCondition[W8_CONDITION_BLIND] != 0, record->kind == 0xc,
-                    static_cast<int>(minimum_level), static_cast<int>(sight_override),
+                    static_cast<int>(minimum_level), static_cast<int>(penalty_modifier),
                     monster_info->player_visibility.sight_state, 0, player_distance);
 
                 visible_to_player = threshold >= player_distance;
             }
             monster_info->player_visibility.can_see = visible_to_player;
-            if (visible_to_player) {
-                monster_info->player_visibility.sight_state = W8_SIGHT_SEEN;
-                monster_info->player_visibility.last_seen_clock = g_status.world_clock;
-                monster_info->player_visibility.target_position = own_position;
-                monster_info->player_visibility.subject_position = camera_position;
-            }
+        }
+        /* Retail 0x00504aae/0x00504ac3/0x00504c66: out of range, no line of sight and
+           not visible all fall through to the same RECENT/UNSEEN decay at 0x00504cb0. */
+        if (visible_to_player) {
+            monster_info->player_visibility.sight_state = W8_SIGHT_SEEN;
+            monster_info->player_visibility.last_seen_clock = g_status.world_clock;
+            monster_info->player_visibility.target_position = own_position;
+            monster_info->player_visibility.subject_position = camera_position;
+        } else if (monster_info->player_visibility.last_seen_clock == 0) {
+            monster_info->player_visibility.sight_state = W8_SIGHT_UNSEEN;
+        } else {
+            monster_info->player_visibility.sight_state = static_cast<unsigned char>(
+                (0xf0U < static_cast<unsigned int>(g_status.world_clock -
+                                                   monster_info->player_visibility.last_seen_clock))
+                    ? W8_SIGHT_UNSEEN
+                    : W8_SIGHT_RECENT);
         }
     }
 
@@ -740,8 +811,10 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
                     W8PartySlotRow* row = &g_status.buffers.XChar[slot];
                     W8Character* character = &g_status.buffers.Char[slot];
 
+                    /* Retail 0x00504f00: cmp [..+0xb01],0xf / jae - unsigned. */
                     if (row->fOccupied && character->hp_current != 0 &&
-                        character->highest_condition < W8_CONDITION_ASLEEP) {
+                        static_cast<unsigned int>(character->highest_condition) <
+                            W8_CONDITION_ASLEEP) {
                         srVector3T<float> observer_position;
                         srVector3T<float> target_position;
 
@@ -759,7 +832,9 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
                         if (g_status.search_mode != 0) {
                             threshold *= g_sight_threat_scale;
                         }
-                        if (threshold >= distance) {
+                        /* Retail 0x00504fb7: fcomp / test ah,0x41 jne - seen unless distance >
+                           threshold, so an unordered (NaN) compare also counts as seen. */
+                        if (!(distance > threshold)) {
                             seen_by_party = true;
                             break;
                         }
@@ -767,7 +842,11 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
                 }
                 monster_info->party_threat.party_detected = seen_by_party;
                 if (seen_by_party) {
-                    if (GetViewDistance() == g_sight_default) {
+                    float view_distance = GetViewDistance();
+
+                    /* Retail 0x00505000: fcomp / test ah,0x40 / je - taken for equal and
+                       for an unordered (NaN) compare, as in IsSightRangeOverridden. */
+                    if (!(view_distance < g_sight_default || view_distance > g_sight_default)) {
                         if (record == 0 ||
                             (SetFactionFlag(static_cast<signed char>(record->faction_id), true),
                              (record->flags & W8_MONSTER_FLAG_NPC) == 0)) {
@@ -808,9 +887,13 @@ void UpdateMonsterSight(W8MonsterInfo* monster_info, bool direction, bool use_bo
                             } else if (!npc->party_noticed && npc->record->monster_bound == 0 &&
                                        ShowMonsterTargetMarker(monster_info) != 0) {
                                 srVector3T<float> delta;
-                                delta = own_position - g_startup_world->GetPosition();
-                                if (delta.Length() < 25000.0f &&
-                                    (npc->party_noticed = true, !gXStatus.fSurprisePossible) &&
+                                /* Retail 0x0050509d: raw navigator position (no eye height),
+                                   and 0x005050fa tests fNpcDialogueMode (gXStatus+0x8df). */
+                                delta = monster->movement.position - g_startup_world->GetPosition();
+                                /* 0x005050e5: fcomp qword 25000.0 / test ah,1 - also taken
+                                   for an unordered (NaN) length. */
+                                if (!(delta.Length() >= 25000.0f) &&
+                                    (npc->party_noticed = true, !gXStatus.fNpcDialogueMode) &&
                                     g_status.current_level != 4) {
                                     int party_slot = GetRandomCharacter(0, 0, -1, -1);
 

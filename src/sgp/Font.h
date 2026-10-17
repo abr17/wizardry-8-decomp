@@ -105,6 +105,18 @@ extern void UnloadFont(UINT32 FontIndex);
 
 extern FontTranslationTable* CreateEnglishTransTable();
 
+/* Mod (Russian translation "Wizardry8_rus 1.2.6"): TRUE when Russian data is found
+   (fonts with Cyrillic in cells 184..249). Set once at startup,
+   see src/wiz8/russian_text.cpp. Always FALSE for English data. */
+extern BOOLEAN gfCyrillicText;
+/* Rebuild the already created "character -> font cell" table the same way as
+   the translation's exe: cp1251 codes 0xC0..0xFF, 0xA8 (Ё), 0xB8 (ё) -> cells
+   184..249; accented Latin letters and ¿ ¡ are removed. */
+extern void UseCyrillicFontTranslation(void);
+/* Mod: whether the font has cells for every character of the string (via the shared
+   translation table). Needed so Russian text is not drawn with a 93-cell font. */
+extern BOOLEAN FontHasCellsForString(INT32 iFont, const CHAR16* string);
+
 extern INT16 GetIndex(UINT16 siChar);
 extern UINT32 GetWidth(HVOBJECT hSrcVObject, INT16 ssIndex);
 

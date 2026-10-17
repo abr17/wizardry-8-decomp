@@ -40,6 +40,70 @@
 #include <new>
 #include <stdlib.h>
 #include "wiz8/local_screens/OptionsScreen.h"
+#include "wiz8/canvas.h"
+#include "wiz8/local_screens/MainGameLayout.h"
+
+/* "Wide windows" mod (2026-10-12): the journal over the whole canvas. The parchment and the bottom
+   strip are stretched by repeating a piece of the image (found with wiz8-widescreen scripts/art/find_slice.py),
+   the level column at the left edge, the entry column wider by 2*ox - long
+   entries (line wrapping in the journal is off) are clipped less; the page
+   strip is stretched as in the options, the mode and exit buttons at the right edge.
+   Outside the canvas layout (W = 640, [Canvas] WideWindows=0) everything is as in the original. */
+enum {
+    /* journal_parchment.sti (640x436): cut in the right column before the
+       torn corner (x 536); the insert is then filled by mirroring
+       (DrawJournalParchment), the piece repeat is only the draft layer. */
+    W8_JOURNAL_PARCHMENT_SLICE_FROM = 435,
+    W8_JOURNAL_PARCHMENT_SLICE_TO = 536,
+    /* journal_base.sti, image 1 (640x44): a piece of the niche under the page strip. */
+    W8_JOURNAL_BAR_SLICE_FROM = 248,
+    W8_JOURNAL_BAR_SLICE_TO = 345
+};
+
+static int JournalWideStretch(void)
+{
+    return CanvasWideLayoutActive() ? 2 * g_canvas_ox : 0;
+}
+
+/* Parchment (0x1b8) marked for re-upload; in the layout - stretched.
+   Repeating a piece produced visible vertical stripes: the paper has a smooth
+   brightness gradient across the sheet, and it jumps at the repeat joints. So the insert
+   of width 2*ox is filled by mirroring the columns before the cut: first
+   in reverse order, then in forward order, so each joint is two
+   identical neighbouring columns, and the last column of the insert is the one that in the
+   original stands right before the right part. Horizontal paper stripes
+   and frame lines run across and do not change under reflection; the original's
+   pixels themselves are not changed, only repeated. */
+static void DrawJournalParchment(void)
+{
+    DrawCatalogImageWide(0x1b8, 0, 0, 0, 0, 0x280, W8_JOURNAL_PARCHMENT_SLICE_FROM,
+                         W8_JOURNAL_PARCHMENT_SLICE_TO, true);
+    const int half = JournalWideStretch() / 2;
+    if (half <= 0) {
+        return;
+    }
+    const int cut = W8_JOURNAL_PARCHMENT_SLICE_TO; /* canvas x: the left part ends here */
+    UINT32 pitch = 0;
+    unsigned char* surface = static_cast<unsigned char*>(LockPrimarySurfaceFull(&pitch));
+    if (surface == 0) {
+        return;
+    }
+    for (int row = 0; row < 0x1b4; ++row) {
+        unsigned short* line = reinterpret_cast<unsigned short*>(surface + row * pitch);
+        for (int column = 0; column < 2 * half; ++column) {
+            int source = column < half ? cut - 1 - column : cut - 2 * half + column;
+            line[cut + column] = line[source];
+        }
+    }
+    UnlockPrimarySurface();
+}
+
+static void AnchorJournalControl(W8TextControl* control, int anchor)
+{
+    if (control != 0 && control->m_region != -1) {
+        SetRegionLayoutAnchor(static_cast<unsigned int>(control->m_region), anchor);
+    }
+}
 
 // GLOBAL: WIZ8 0x0064df38
 int g_journal_page = -1;
@@ -196,8 +260,10 @@ void DrawJournalLine(const wchar_t* text, int column, int y, int palette, bool c
         right = 0xaf;
     } else {
         left = 0xc1;
-        right = 0x1b3;
+        right = 0x1b3 + JournalWideStretch(); /* mod: entry column is wider */
     }
+    /* Mod: both columns from the left canvas edge (stretched parchment). */
+    CanvasDrawScope layout_scope(W8_ANCHOR_LEFT);
     if (!centered) {
         x = 5;
     } else {
@@ -233,7 +299,7 @@ void W8JournalPanel::Refresh()
         wchar_t page_text[20];
         swprintf(page_text, g_journal_page_format, g_journal_page + 1, page_count);
         m_page_text->SetText(page_text, g_options_detail_font);
-        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x1b8, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
+        DrawJournalParchment(); /* mod: stretched in the layout */
         DrawJournalLine(gppStringList[0x6db], 0, 0x19, 0, true);
         DrawJournalLine(gppStringList[0x6dc], 1, 0x19, 0, true);
 
@@ -248,8 +314,11 @@ void W8JournalPanel::Refresh()
             const W8JournalEntry* entry = g_journal_entries->GetAt(index);
             const W8FactDatabaseRecord* fact = &g_fact_records[entry->fact];
             int active = fact->highlight_when_true && GetFact(entry->fact);
-            const wchar_t* description =
-                entry->alternate_text ? fact->alternate_description : fact->description;
+            /* Retail 0x005bda00: tests only the low byte (retail-made saves carry stack
+               garbage in the upper 3 bytes of this dword). */
+            const wchar_t* description = (entry->alternate_text & 0xff) != 0
+                                             ? fact->alternate_description
+                                             : fact->description;
             const wchar_t* level_name;
             if (entry->level == 0x38) {
                 level_name = g_default_level;
@@ -268,7 +337,7 @@ void W8JournalPanel::Refresh()
         m_next->SetEnabled(false);
         m_previous->SetEnabled(false);
         m_page_text->SetText(g_journal_alternate_page, g_options_detail_font);
-        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x1b8, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
+        DrawJournalParchment(); /* mod: stretched in the layout */
         DrawJournalLine(gppStringList[0x6de], 0, 0x19, 0, true);
         DrawJournalLine(gppStringList[0x6df], 1, 0x19, 0, true);
 
@@ -343,6 +412,14 @@ W8JournalPanel::W8JournalPanel(unsigned int* region_set)
     if ((m_mode->m_stateFlags & g_W8TextControlStateSecondary) != 0) {
         m_mode->DisableSecondaryState(true);
     }
+    /* Mod (wide windows): the page strip is stretched (as in the options), the arrows at
+       its ends, the mode and exit buttons - in the right part of the bottom strip. Outside
+       the canvas layout anchors and the background mode have no effect. */
+    m_wideMode = W8_PANEL_WIDE_STRETCH;
+    AnchorJournalControl(m_previous, W8_ANCHOR_LEFT);
+    AnchorJournalControl(m_next, W8_ANCHOR_RIGHT);
+    AnchorJournalControl(m_mode, W8_ANCHOR_RIGHT);
+    AnchorJournalControl(m_close, W8_ANCHOR_RIGHT);
 }
 
 // FUNCTION: WIZ8 0x005bd7f0
@@ -428,6 +505,10 @@ unsigned char JournalScreenEnter(void)
     MSYS_Init();
     ResetRegions();
     UpdateHeldItemCursor();
+    /* Mod (wide windows): the journal over the whole canvas (see the top of the file). */
+    if (g_canvas_ox > 0 && CanvasWideWindowsEnabled()) {
+        CanvasSetWideLayout(true);
+    }
     g_journal_entries = new W8GrowableVector<W8JournalEntry>();
     g_journal_panel = new W8JournalPanel(&g_journal_region_set);
 
@@ -447,14 +528,19 @@ unsigned char JournalScreenEnter(void)
     for (index = 0; index < g_fact_journal_entries->GetCount(); ++index) {
         W8JournalEntry entry = *g_fact_journal_entries->GetAt(index);
         const W8FactDatabaseRecord* fact = &g_fact_records[entry.fact];
-        const wchar_t* description =
-            entry.alternate_text ? fact->alternate_description : fact->description;
+        /* Retail 0x005bdfb8: mov dl,[ecx+8]; test dl,dl -- only the low byte counts
+           (retail-made saves carry stack garbage in the upper 3 bytes). */
+        const wchar_t* description = (entry.alternate_text & 0xff) != 0
+                                         ? fact->alternate_description
+                                         : fact->description;
         if ((g_journal_show_all || fact->visibility <= maximum_visibility) && *description != 0) {
             g_journal_entries->Add(entry);
         }
     }
     g_journal_panel->Refresh();
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x1b7, 0, 1, 0, 0x1b4, VO_BLT_SRCTRANSPARENCY, 0);
+    /* Mod: the bottom strip is stretched in the layout (outside it - as in the original). */
+    DrawCatalogImageWide(0x1b7, 0, 1, 0, 0x1b4, 0x280, W8_JOURNAL_BAR_SLICE_FROM,
+                         W8_JOURNAL_BAR_SLICE_TO, true);
     return 1;
 }
 
@@ -463,6 +549,9 @@ unsigned char JournalScreenLeave(int)
 {
     MSYS_Shutdown();
     ResetRegions();
+    if (CanvasWideLayoutActive()) {
+        CanvasSetWideLayout(false); /* mod: wide windows */
+    }
     delete g_journal_panel;
     g_journal_panel = 0;
     g_journal_entries->Clear();

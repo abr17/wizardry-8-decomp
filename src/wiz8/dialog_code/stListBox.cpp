@@ -27,8 +27,9 @@ void W8ListBoxDialog::TextAreaButtonCallback(GUI_BUTTON* button, INT32 reason)
         POINT cursor;
         SGPMouseGetPos(&cursor);
         /* Retail read this top edge uninitialized when the area button is
-           absent (the leftover argument slot); the recovery keeps that read. */
-        int top;
+           absent (the leftover argument slot); the recovery keeps that read.
+           msvc2022 port: that slot is the `reason` argument (retail 0x005CCEDC). */
+        int top W8_RETAIL_STALE(reason);
         if (dialog->m_area_button != -1) {
             SGPRect area;
             GetButtonArea(dialog->m_area_button, &area);
@@ -126,9 +127,11 @@ void W8ListBoxDialog::SliderTrackButtonCallback(GUI_BUTTON* button, INT32 reason
         POINT cursor;
         SGPMouseGetPos(&cursor);
         /* Retail read both track edges uninitialized when the text-area
-           button is absent (the leftover argument slots); the recovery keeps that read. */
-        int top;
-        int bottom;
+           button is absent (the leftover argument slots); the recovery keeps that read.
+           msvc2022 port: both slots are the `reason` argument (retail 0x005CD26D),
+           so bottom - top is 0 and retail faults in the division below. */
+        int top W8_RETAIL_STALE(reason);
+        int bottom W8_RETAIL_STALE(reason);
         if (dialog->m_third_text_button != -1) {
             SGPRect area;
             GetButtonArea(dialog->m_third_text_button, &area);

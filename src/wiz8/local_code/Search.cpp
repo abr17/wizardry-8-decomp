@@ -172,8 +172,14 @@ void W8Searchable::GetPosition(srVector3T<float>* position)
             world_item->p3D->GetSearchPosition(position);
             return;
         }
-        position->Set(world_item->position.x, world_item->position.y + g_octree_cell_scale,
-                      world_item->position.z);
+        /* Retail 0x005170ba..0x005170d3 copies x and z as raw dwords (mov), so a
+           signalling NaN stays signalling; only y goes through the x87 add (found by
+           the w8diff harness). */
+        *reinterpret_cast<unsigned int*>(&position->x) =
+            *reinterpret_cast<const unsigned int*>(&world_item->position.x);
+        position->y = world_item->position.y + g_octree_cell_scale;
+        *reinterpret_cast<unsigned int*>(&position->z) =
+            *reinterpret_cast<const unsigned int*>(&world_item->position.z);
         return;
     }
     if (cursor_node != 0) {
@@ -316,8 +322,11 @@ int W8Searchable::PickBestSearcher()
     bool earned = false;
     for (int slot = 0; slot < W8_PARTY_SLOT_COUNT; ++slot) {
         W8Character* character = &g_status.buffers.Char[slot];
+        /* Retail 0x005175a6 compares the condition unsigned (cmp 0xd / jae), so a
+           condition >= 0x80000000 is skipped (found by the w8diff harness). */
         if (!g_status.buffers.XChar[slot].fOccupied || character->hp_current == 0 ||
-            character->highest_condition >= W8_CONDITION_TURNCOAT) {
+            static_cast<unsigned int>(character->highest_condition) >=
+                static_cast<unsigned int>(W8_CONDITION_TURNCOAT)) {
             continue;
         }
         if (CharacterHasTrait(character, W8_TRAIT_SEARCH) || g_status.search_mode != 0) {
@@ -367,8 +376,14 @@ int W8Searchable::PickBestSearcher()
     GetCameraPosition(&camera);
     srVector3T<float> position;
     GetPosition(&position);
-    srVector3T<float> delta = camera - position;
-    if (delta.Length() < range) {
+    /* Retail 0x00517702..0x00517738: the differences, the (z*z + y*y) + x*x sum and the
+       root stay on the x87 stack (53-bit, no float rounding), and fcomp + test ah,1
+       takes the in-range branch on less-than or unordered, so a NaN distance still
+       returns the slot (found by the w8diff harness). */
+    double dx = static_cast<double>(camera.x) - static_cast<double>(position.x);
+    double dy = static_cast<double>(camera.y) - static_cast<double>(position.y);
+    double dz = static_cast<double>(camera.z) - static_cast<double>(position.z);
+    if (!(sqrt(dz * dz + dy * dy + dx * dx) >= static_cast<double>(range))) {
         if (earned) {
             PracticeCharacterSkill(&g_status.buffers.Char[best_slot], W8_SKILL_SCOUTING, 5, false);
         }

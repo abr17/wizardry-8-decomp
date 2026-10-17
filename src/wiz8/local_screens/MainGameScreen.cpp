@@ -148,6 +148,8 @@
 #include <string.h>
 #include "wiz8/layouts/game_status.h"
 #include "wiz8/local_screens/OptionsScreen.h"
+#include "wiz8/local_screens/MainGameLayout.h"
+#include "wiz8/wide_art.h"
 
 /* Every redraw request checks the screen state first, so a request made from
    another screen is simply dropped. */
@@ -614,9 +616,14 @@ void W8LockTumbler::Redraw(bool full_redraw)
     } else if (m_hovered && !m_rising && !m_falling) {
         frame += 3;
     }
-    DrawCatalogImage(FRAME_BUFFER, 0x1ae, 0, frame, left, top, VO_BLT_SRCTRANSPARENCY, 0);
+    /* Port fix (2026-10-12, checked against 0x5854B0): a pin is drawn at
+       its own height m_pin_height (moved by the raise/drop animation), not
+       at the top point of the widget - otherwise the lock pins did not move. */
+    int pin_y = m_pin_height + m_pPanel->m_bounds.top;
+    DrawCatalogImage(FRAME_BUFFER, 0x1ae, 0, frame, left, pin_y, VO_BLT_SRCTRANSPARENCY, 0);
     if (m_at_top) {
-        DrawCatalogImage(FRAME_BUFFER, 0x1ae, 0, g_lock_phase + 0x11, right, top - 4,
+        /* Retail 0x5855DD: x = ebp, reloaded with left - 3 at 0x58553D (not right). */
+        DrawCatalogImage(FRAME_BUFFER, 0x1ae, 0, g_lock_phase + 0x11, left - 3, pin_y - 4,
                          VO_BLT_SRCTRANSPARENCY, 0);
     }
     m_dirty = false;
@@ -873,6 +880,8 @@ done:
 void W8LockInfoPanel::Redraw()
 {
     if (m_fEnabled && m_fDirty) {
+        /* Layout A: texts are drawn where the panel background is (at its edge). */
+        CanvasDrawScope layout_scope(m_layoutAnchor);
         Controls::Redraw();
         m_text0->RenderToTarget(0, false, FRAME_BUFFER);
         m_text1->RenderToTarget(0, false, FRAME_BUFFER);
@@ -922,6 +931,16 @@ W8LockInteraction::W8LockInteraction(Trigger* trigger) : m_timer()
     m_spell_button->EnableRegionHelp(0x7cb);
     m_force_button->EnableRegionHelp(0x7cd);
     m_cancel_button->EnableRegionHelp(0x7cc);
+    /* Wide canvas, layout A (2026-10-12): character info - at the
+       left canvas edge, buttons (spell, power, item, done) - at the
+       right, the lock pins stay centered. The middle must not be stretched:
+       the pins sit at their own places on the background. The gaps between the mechanism and the side
+       panels are a continuation of its black housing: the image edges (stone and
+       frame) move to the gap edges, with black repeated between them (slices are in the
+       table in MainGameLayout.cpp). Outside the layout the shifts are zero. */
+    PlaceSubscreenPanel(m_info_panel, W8_SUBSCREEN_LEFT);
+    PlaceSubscreenPanel(m_tumbler_panel, W8_SUBSCREEN_CENTER_FILL);
+    PlaceSubscreenPanel(m_action_panel, W8_SUBSCREEN_RIGHT);
     m_action_panel->EnableRegionSet(true);
     m_action_panel->SetEnabled(true);
     m_action_panel->Invalidate(0);
@@ -1401,7 +1420,10 @@ void W8MainGameTextKeyHandler::Redraw(bool full_redraw)
     }
     left = m_pPanel->m_bounds.left + m_left;
     top = m_pPanel->m_bounds.top + m_top;
-    right = m_pPanel->m_bounds.left + m_right;
+    /* Layout A: the trap list stretches together with the list field of the device
+       panel (+2*ox to the right, see W8MainGameScreen::W8MainGameScreen). Outside
+       the layout - 0, as in the original. The 420 px background texture is enough. */
+    right = m_pPanel->m_bounds.left + m_right + SubscreenPanelStretch(m_pPanel);
     bottom = m_pPanel->m_bounds.top + m_bottom;
     InvalidateRegion(left, top, right, bottom, 0);
     BlitCatalogSurfaceRectTo16BPP(FRAME_BUFFER, left, top, right, bottom, 0x1b6, 0, 0);
@@ -1700,6 +1722,9 @@ void W8MainGameTextPanel::Redraw()
     if (!m_fEnabled) {
         return;
     }
+    /* Layout A: the check bar and the icon frame highlight are drawn bypassing
+       Controls::Redraw - where the panel background is (at the left canvas edge). */
+    CanvasDrawScope layout_scope(m_layoutAnchor);
     if (m_progress_display) {
         progress = static_cast<int>(m_progress_elapsed * g_text_panel_progress_scale);
         if (progress > m_progress_drawn) {
@@ -1708,7 +1733,8 @@ void W8MainGameTextPanel::Redraw()
                              m_text_bounds.bottom, 0);
             GetClippingRect(&previous);
             clip = previous;
-            clip.iBottom = m_text_bounds.left + m_progress_drawn;
+            /* Retail 0x5888F2: only the RIGHT edge is set, so the bar fills left to right. */
+            clip.iRight = m_text_bounds.left + m_progress_drawn;
             SetClippingRect(&clip);
             DrawCatalogImage(FRAME_BUFFER, 0x1b5, 0, 0, m_text_bounds.left, m_text_bounds.top,
                              VO_BLT_SRCTRANSPARENCY, 0);
@@ -1897,6 +1923,8 @@ int GetPartySlotLocksTrapsLevel(int slot)
 void W8MainGameStatusPanel::Redraw()
 {
     if (m_fEnabled && m_fDirty) {
+        /* Layout A: texts are drawn where the panel background is (at its edge). */
+        CanvasDrawScope layout_scope(m_layoutAnchor);
         Controls::Redraw();
         m_text->RenderToTarget(0, false, FRAME_BUFFER);
         m_text0->RenderToTarget(0, false, FRAME_BUFFER);
@@ -1938,6 +1966,21 @@ W8MainGameScreen::W8MainGameScreen(Trigger* owner)
     m_action_controls[2]->EnableRegionHelp(0x7cf);
     m_action_controls[3]->EnableRegionHelp(0x7cc);
     m_action_controls[4]->EnableRegionHelp(0x7d0);
+    /* Wide canvas, layout A (2026-10-12): character condition - at the left
+       canvas edge, action buttons - at the right. The device panel is stretched
+       like the log: the frame with icons and the check bar stays on the left (right next to
+       the character condition), and the black trap list field stretches by 2*ox up to the
+       buttons on the right. The list itself is wider by the same amount (mouse region here,
+       drawing - W8MainGameTextKeyHandler::Redraw), and the scroll bar
+       moves to the right edge of the field (RIGHT anchor: +2*ox from the left edge).
+       Previously the panel was centered and the gaps were filled by repeating 8 px at the
+       edges of its image - on the right that was the list field frame (stripes).
+       Outside the layout shifts and stretches are zero. */
+    PlaceSubscreenPanel(m_status_panel, W8_SUBSCREEN_LEFT);
+    PlaceSubscreenPanel(m_text_panel, W8_SUBSCREEN_STRETCH);
+    PlaceSubscreenPanel(m_action_panel, W8_SUBSCREEN_RIGHT);
+    m_text_panel->m_key_handler->m_range.SetLayoutAnchor(W8_ANCHOR_RIGHT);
+    StretchWidgetRegion(m_text_panel->m_key_handler);
     m_action_panel->EnableRegionSet(true);
     m_action_panel->SetEnabled(true);
     m_action_panel->Invalidate(0);
@@ -2530,6 +2573,8 @@ void W8NpcDialogueTextController::Redraw()
 
     was_dirty = m_fDirty;
     if (m_fEnabled) {
+        /* Layout A: the transcript and its children at their canvas edge. */
+        CanvasDrawScope layout_scope(m_layoutAnchor);
         force = was_dirty;
         if (force) {
             DrawCatalogImageAndInvalidate(FRAME_BUFFER, m_catalogObject, m_catalogFrame,
@@ -2635,9 +2680,13 @@ void W8NpcDialogueTextController::Collapse()
 
     visible = 0;
     top = (m_bounds.top - (scroll_height / line_height) * line_height) - margin;
-    ClearSurfaceRect(m_bounds.left, top, m_bounds.right, m_bounds.bottom);
-    Invalidate(0);
-    InvalidateRegion(m_bounds.left, top, m_bounds.right, m_bounds.bottom, 0);
+    {
+        /* Layout A: erase where the transcript is drawn. */
+        CanvasDrawScope layout_scope(m_layoutAnchor);
+        ClearSurfaceRect(m_bounds.left, top, m_bounds.right, m_bounds.bottom);
+        Invalidate(0);
+        InvalidateRegion(m_bounds.left, top, m_bounds.right, m_bounds.bottom, 0);
+    }
     if (top < 0x67) {
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_1);
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_3);
@@ -2704,8 +2753,12 @@ void W8NpcDialogueTextController::ClearBackground()
     int top;
 
     top = ((1 - scroll_height / line_height) * line_height - margin) + m_bounds.top;
-    ClearSurfaceRect(m_bounds.left, top, m_bounds.right, m_bounds.bottom);
-    InvalidateRegion(m_bounds.left, top, m_bounds.right, m_bounds.bottom, 0);
+    {
+        /* Layout A: erase where the transcript is drawn. */
+        CanvasDrawScope layout_scope(m_layoutAnchor);
+        ClearSurfaceRect(m_bounds.left, top, m_bounds.right, m_bounds.bottom);
+        InvalidateRegion(m_bounds.left, top, m_bounds.right, m_bounds.bottom, 0);
+    }
     if (top < 0x67) {
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_1);
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_3);
@@ -2912,13 +2965,17 @@ unsigned char MainGameScreenEnter(void)
     gXStatus.level_up_notice = true;
     MSYS_Init();
     ResetRegions();
+    /* Wide canvas: HUD layout A (portraits and panels at the canvas edges)
+       from here until MainGameScreenLeave; no-op at W = 640. */
+    MainGameLayoutEnter();
     CreateMainGameInterfaceButtons();
     CreateSpellIconHudControls();
     CreateLevelButtons();
     CreateConditionButtons();
     InitializeMainGameLevelBlock();
     ScrollTextBoxToCursor();
-    SetClippingRegionAndImageWidth(0x500, 0, 0, 0x280, 0x1e0);
+    /* wide canvas: real pitch */
+    SetClippingRegionAndImageWidth(CanvasFrameBufferPitch(), 0, 0, 0x280, 0x1e0);
     SetFontDestBuffer(FRAME_BUFFER, 0, 0, 0x280, 0x1e0, 0);
     g_world_render_enabled = 1;
     g_monster_shadow_updates_enabled = 1;
@@ -3508,6 +3565,9 @@ unsigned char MainGameScreenLeave(int leaving)
     DisableSky();
     DestroyMainGameInterfaceButtons();
     DestroySpellIconHudControls();
+    /* Wide canvas: back to the centered 640 window for the next screen; the
+       HUD left in the side bars is wiped and the whole canvas re-uploaded. */
+    MainGameLayoutLeave();
     return 1;
 }
 
@@ -3560,7 +3620,7 @@ void ApplyMainGameRedrawFlags(void)
     bool keyboard_menu_invalidate;
     int party_slot;
     int text_box_variant;
-    unsigned char text_box_mode;
+    short text_buffer;
     bool show_portraits;
     SGPRect saved_clip;
     SGPRect combat_clip;
@@ -3585,7 +3645,8 @@ void ApplyMainGameRedrawFlags(void)
     if ((g_level_block->redraw_flags & W8_MAIN_REDRAW_COMBAT_EFFECTS) != 0) {
         RefreshCombatEffectHud();
         RequestRedraw(W8_MAIN_REDRAW_PORTRAIT_PANEL);
-        for (party_slot = 0; party_slot < 8; ++party_slot) {
+        /* Retail 0x562ef7..0x562f32 tests only slots 0 and 1 (bytes 0x109, 0x10a). */
+        for (party_slot = 0; party_slot < 2; ++party_slot) {
             if (g_level_block->portrait_refresh_pending[party_slot] != 0) {
                 RequestRedraw(1U << (party_slot & 0x1f));
             }
@@ -3638,6 +3699,8 @@ void ApplyMainGameRedrawFlags(void)
         RefreshFormationPanel(show_portraits);
     }
     for (party_slot = 0; party_slot < 8; ++party_slot) {
+        /* Wide canvas layout A: the slot's portrait column (left/right edge). */
+        CanvasDrawScope slot_scope(CanvasPartySlotAnchor(party_slot));
         portrait_rect = &g_main_game_invalidate_rects[party_slot];
         if ((g_level_block->redraw_flags & (1U << (party_slot & 0x1f))) == 0) {
             if (gXStatus.monster_manager_entries[party_slot].portrait_stats_dirty) {
@@ -3667,9 +3730,16 @@ void ApplyMainGameRedrawFlags(void)
     }
     if ((g_level_block->redraw_flags & W8_MAIN_REDRAW_LAYOUT) != 0) {
         RedrawLayoutArrowButtons();
-        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 1, 0x269, 0x166,
-                                      VO_BLT_SRCTRANSPARENCY, 0);
-        InvalidateRegion(0x269, 0x166, 0x27f, 0x1c1, 0);
+        {
+            /* Wide canvas layout A: the right strip sits at the right edge. */
+            CanvasDrawScope right_scope(W8_ANCHOR_RIGHT);
+            DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 1, 0x269, 0x166,
+                                          VO_BLT_SRCTRANSPARENCY, 0);
+            InvalidateRegion(0x269, 0x166, 0x27f, 0x1c1, 0);
+        }
+        /* Layout A: the bottom-panel sub-screens (NPC, spell, item, lock,
+           trap) fill the whole wide panel themselves (PlaceSubscreenPanel),
+           so nothing is wiped beside them any more. */
     }
     if (gXStatus.fSpellCastMode) {
         if ((g_level_block->redraw_flags & W8_MAIN_REDRAW_TEXT_BOX) != 0) {
@@ -3707,43 +3777,61 @@ void ApplyMainGameRedrawFlags(void)
             goto finish_mode_overlays;
         }
         redraw_flags = g_level_block->redraw_flags & W8_MAIN_REDRAW_RADAR;
-        if (redraw_flags == 0 || g_level_block->radar_map_visible == 0) {
-            if (redraw_flags != 0) {
-                ClearSurfaceRect(0x17, 0x166, 0x80, 0x1c2);
+        {
+            /* Wide canvas layout A: radar panel at the left canvas edge. */
+            CanvasDrawScope left_scope(W8_ANCHOR_LEFT);
+            if (redraw_flags == 0 || g_level_block->radar_map_visible == 0) {
+                if (redraw_flags != 0) {
+                    ClearSurfaceRect(0x17, 0x166, 0x80, 0x1c2);
+                }
+            } else {
+                DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x84, 0, 0, 0x17, 0x166,
+                                              VO_BLT_SRCTRANSPARENCY, 0);
             }
-        } else {
-            DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x84, 0, 0, 0x17, 0x166,
-                                          VO_BLT_SRCTRANSPARENCY, 0);
         }
         redraw_flags = g_level_block->redraw_flags & W8_MAIN_REDRAW_TEXT_BOX;
         if (redraw_flags == 0 || g_level_block->action_panel_visible == 0) {
             if (redraw_flags != 0) {
-                ClearSurfaceRect(0x80, 0x166, 0x200, 0x1c2);
+                /* Layout A: the log area runs from 128 to the right panel. */
+                ClearSurfaceRectWide(0x80, 0x166, 0x200, 0x1c2);
             }
         } else {
-            DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x87, 0, 0, 0x80, 0x166,
-                                          VO_BLT_SRCTRANSPARENCY, 0);
-            text_box_mode = GetTextBoxMode();
-            if (text_box_mode == 0 || text_box_mode == 1) {
-                text_box_variant = text_box_mode;
-            } else if (text_box_mode == 3) {
+            /* Layout A: main_textbox_back (384 px) stretched by 2*ox; left
+               part stays at x 128. The dark texture repeats every 97 px, so
+               the slice [152, 249) tiles without the vertical "accordion"
+               bars a 16 px middle slice gave (wiz8-widescreen scripts/art/find_slice.py). */
+            DrawCatalogImageWide(0x87, 0, 0, 0x80, 0x166, 0x180, 152, 249, true);
+            /* Retail 0x563713 reads g_status.text_line_cursor (word at 0x686905),
+               not GetTextBoxMode(). */
+            text_buffer = g_status.text_line_cursor;
+            if (text_buffer == 0 || text_buffer == 1) {
+                text_box_variant = text_buffer;
+            } else if (text_buffer == 3) {
                 text_box_variant = 2;
             } else {
-                FormatDebugMessage(0, g_warning_drawing_text_box_while_text_buffer, text_box_mode);
+                FormatDebugMessage(0, g_warning_drawing_text_box_while_text_buffer, text_buffer);
                 goto draw_formation_panel;
             }
-            DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x88, 0, text_box_variant, 0x8a, 0x168,
-                                          VO_BLT_SRCTRANSPARENCY, 0);
+            {
+                /* Layout A: the channel tabs belong to the log's left end. */
+                CanvasDrawScope left_scope(W8_ANCHOR_LEFT);
+                DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x88, 0, text_box_variant, 0x8a,
+                                              0x168, VO_BLT_SRCTRANSPARENCY, 0);
+            }
         }
     draw_formation_panel:
         redraw_flags = g_level_block->redraw_flags & W8_MAIN_REDRAW_FORMATION;
-        if (redraw_flags == 0 || !g_level_block->formation_board_visible) {
-            if (redraw_flags != 0) {
-                ClearSurfaceRect(0x200, 0x166, 0x268, 0x1c2);
+        {
+            /* Wide canvas layout A: formation board at the right canvas edge. */
+            CanvasDrawScope right_scope(W8_ANCHOR_RIGHT);
+            if (redraw_flags == 0 || !g_level_block->formation_board_visible) {
+                if (redraw_flags != 0) {
+                    ClearSurfaceRect(0x200, 0x166, 0x268, 0x1c2);
+                }
+            } else {
+                DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x83, 0, 0, 0x200, 0x166,
+                                              VO_BLT_SRCTRANSPARENCY, 0);
             }
-        } else {
-            DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x83, 0, 0, 0x200, 0x166,
-                                          VO_BLT_SRCTRANSPARENCY, 0);
         }
         goto finish_mode_overlays;
     }
@@ -4133,6 +4221,9 @@ void SelectPartyCharacter(int party_slot)
     g_level_block->pick_changed = true;
 }
 
+/* Wide canvas layout A: anchor of the portrait hover panel now on screen. */
+static int g_highlight_overlay_anchor = W8_ANCHOR_CENTER;
+
 // FUNCTION: WIZ8 0x00561a20
 void RefreshSelectedPartyPortrait(unsigned int party_slot)
 {
@@ -4175,12 +4266,10 @@ void RefreshSelectedPartyPortrait(unsigned int party_slot)
             ReleaseObject(g_level_block->highlight_graphic);
             g_level_block->highlight_graphic = 0;
         }
-        ClearSurfaceRect(g_level_block->dialogue_x, g_level_block->dialogue_y,
-                         g_level_block->dialogue_x + g_level_block->dialogue_width,
-                         g_level_block->dialogue_y + g_level_block->dialogue_height);
-        InvalidateRegion(g_level_block->dialogue_x, g_level_block->dialogue_y,
-                         g_level_block->dialogue_x + g_level_block->dialogue_width,
-                         g_level_block->dialogue_y + g_level_block->dialogue_height, 0);
+        /* Port fix (2026-10-12): as in the original - the same erase
+           as ClearHighlightOverlayRegion, together with redrawing the spell
+           bar and the text window if the panel touched them. */
+        ClearHighlightOverlayRegion();
     }
 
     g_main_game_mode = W8_MAIN_GAME_PORTRAIT_REFRESH;
@@ -4233,6 +4322,11 @@ static void DrawHighlightFrameRow(int left, int right, int y, unsigned int tiles
 void DrawHighlightOverlay(unsigned int party_slot, int row_count, unsigned int min_width)
 {
     SetMainGameMode(W8_MAIN_GAME_HIGHLIGHT_OVERLAY);
+    /* Wide canvas layout A: the panel hangs off the slot's portrait column,
+       so it moves with that column; remembered for the clear in
+       ClearHighlightOverlayRegion. */
+    g_highlight_overlay_anchor = CanvasPartySlotAnchor(static_cast<int>(party_slot));
+    CanvasDrawScope layout_scope(g_highlight_overlay_anchor);
 
     wchar_t* name = g_status.buffers.Char[party_slot].name;
     int width = StringPixLength(name, g_wiz_text_font);
@@ -4407,6 +4501,7 @@ static void DrawPortraitEnchantmentRow(const W8Character* character, int slot, i
 // FUNCTION: WIZ8 0x00564710
 void DrawPortraitVitalsOverlay(int party_slot)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(party_slot)); /* layout A */
     int realm_icons[6] = {0x193, 0x194, 0x195, 0x196, 0x197, 0x198};
     W8Character* character = &g_status.buffers.Char[party_slot];
 
@@ -4542,6 +4637,7 @@ static int MeasurePortraitEnchantments(const W8Character* character, unsigned in
 // FUNCTION: WIZ8 0x00564BA0
 void DrawPortraitConditionOverlay(int party_slot)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(party_slot)); /* layout A */
     W8Character* character = &g_status.buffers.Char[party_slot];
 
     unsigned int max_width = 0;
@@ -4567,6 +4663,7 @@ void DrawPortraitConditionOverlay(int party_slot)
 // FUNCTION: WIZ8 0x00564D80
 void DrawPortraitStatusOverlay(int party_slot)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(party_slot)); /* layout A */
     W8Character* character = &g_status.buffers.Char[party_slot];
     unsigned int max_width = 0;
     bool truncated = false;
@@ -4624,6 +4721,7 @@ void DrawPortraitStatusOverlay(int party_slot)
 // FUNCTION: WIZ8 0x005651F0
 void DrawPortraitEnchantmentOverlay(int party_slot)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(party_slot)); /* layout A */
     W8Character* character = &g_status.buffers.Char[party_slot];
 
     unsigned int max_width = 0;
@@ -4802,6 +4900,9 @@ W8MainGameInvalidateRect g_main_game_invalidate_rects[23] = {
     {0, 0, 0, 0, 0, 0, 0},
 };
 
+static void InvalidateMainGameRectForLayout(unsigned int index, int left, int top, int right,
+                                            int bottom);
+
 /* Second redraw pass: invalidate each rectangle whose bit is set in
    saved_redraw_flags, applying the mode-6 portrait layout offsets. */
 // FUNCTION: WIZ8 0x00563D00
@@ -4847,7 +4948,80 @@ void ApplySavedRedrawInvalidates(void)
                 right -= delta;
             }
         }
-        InvalidateRegion(left, top, right + 1, bottom + 1, 1);
+        InvalidateMainGameRectForLayout(bit, left, top, right + 1, bottom + 1);
+    }
+}
+
+/* Wide canvas layout A: where each g_main_game_invalidate_rects entry really
+   is on the canvas. Off (W = 640): a plain InvalidateRegion, as retail. */
+enum W8InvalidateRectPlace {
+    PLACE_SLOT,        /* portrait slot rows 0..7: column of the slot */
+    PLACE_LEFT,        /* stuck to the left canvas edge */
+    PLACE_RIGHT,       /* stuck to the right canvas edge */
+    PLACE_CENTER,      /* centered, as retail (viewport rect is pre-widened) */
+    PLACE_WIDE,        /* spans to the right edge: left fixed, right +2*ox */
+    PLACE_WIDE_CENTER, /* widened log/overlay band: left -ox, right +ox */
+    PLACE_BOTH         /* small rect on a widened border: invalidate both spots */
+};
+static const unsigned char g_main_game_invalidate_places[23] = {
+    PLACE_SLOT,   PLACE_SLOT,        PLACE_SLOT,   PLACE_SLOT,   /* 0..3 portraits */
+    PLACE_SLOT,   PLACE_SLOT,        PLACE_SLOT,   PLACE_SLOT,   /* 4..7 portraits */
+    PLACE_WIDE,                                                  /* 8 roof */
+    PLACE_WIDE,                                                  /* 9 whole bottom panel */
+    PLACE_LEFT,                                                  /* 10 radar */
+    PLACE_WIDE_CENTER,                                           /* 11 message log */
+    PLACE_WIDE,                                                  /* 12 bottom bar 31..606 */
+    PLACE_BOTH,                                                  /* 13 log right edge */
+    PLACE_RIGHT,                                                 /* 14 formation board */
+    PLACE_CENTER,                                                /* 15 3D viewport */
+    PLACE_WIDE_CENTER,                                           /* 16 band above panel */
+    PLACE_CENTER,                                                /* 17 combat monster list */
+    PLACE_LEFT,                                                  /* 18 options disk */
+    PLACE_WIDE,                                                  /* 19 bottom bar caption */
+    PLACE_RIGHT,                                                 /* 20 combat stance button */
+    PLACE_CENTER,         PLACE_CENTER,                          /* 21, 22 unused */
+};
+
+static void InvalidateMainGameRectForLayout(unsigned int index, int left, int top, int right,
+                                            int bottom)
+{
+    if (!CanvasWideLayoutActive() || index >= 23) {
+        InvalidateRegion(left, top, right, bottom, 1);
+        return;
+    }
+    switch (g_main_game_invalidate_places[index]) {
+    case PLACE_SLOT: {
+        CanvasDrawScope scope(CanvasPartySlotAnchor(static_cast<int>(index)));
+        InvalidateRegion(left, top, right, bottom, 1);
+        break;
+    }
+    case PLACE_LEFT: {
+        CanvasDrawScope scope(W8_ANCHOR_LEFT);
+        InvalidateRegion(left, top, right, bottom, 1);
+        break;
+    }
+    case PLACE_RIGHT: {
+        CanvasDrawScope scope(W8_ANCHOR_RIGHT);
+        InvalidateRegion(left, top, right, bottom, 1);
+        break;
+    }
+    case PLACE_WIDE: {
+        CanvasDrawScope scope(W8_ANCHOR_LEFT);
+        InvalidateRegion(left, top, right + 2 * g_canvas_ox, bottom, 1);
+        break;
+    }
+    case PLACE_WIDE_CENTER:
+        InvalidateRegion(MainGameWideLeft(left), top, MainGameWideRight(right), bottom, 1);
+        break;
+    case PLACE_BOTH: {
+        InvalidateRegion(left, top, right, bottom, 1);
+        CanvasDrawScope scope(W8_ANCHOR_RIGHT);
+        InvalidateRegion(left, top, right, bottom, 1);
+        break;
+    }
+    default:
+        InvalidateRegion(left, top, right, bottom, 1);
+        break;
     }
 }
 
@@ -4895,12 +5069,17 @@ void RequestLevelTransition(int level, int entry, unsigned char flag)
 // FUNCTION: WIZ8 0x005618f0
 void SetViewportMode(int mode)
 {
+    W8ScreenRect widened;
     W8ScreenRect* rect;
 
     if (mode == g_level_block->camera_mode) {
         return;
     }
-    rect = &g_viewport_modes[mode];
+    /* Wide canvas layout A: the mode's rectangle widened by ox on both sides
+       (game x may then be negative); vertical edges unchanged. The camera
+       plane follows linearly in SetViewport, i.e. Hor+ for exactly this rect. */
+    MainGameViewportRect(mode, &widened);
+    rect = &widened;
     SetRegionBounds(0xe6, rect->left, rect->top, rect->right - 1, rect->bottom - 1);
     W8MainGameInvalidateRect& viewport = g_main_game_invalidate_rects[15];
     viewport.left = rect->left;
@@ -4935,7 +5114,9 @@ static bool IsPartyPortraitUnderCursor(unsigned int party_slot)
     if (left < 0) {
         left = 0;
     }
-    return IsCursorInRectangle(left, row.top, right, row.bottom);
+    /* Wide canvas layout A: the rect is in the slot column's own 640 space. */
+    return IsCursorInAnchoredRectangle(CanvasPartySlotAnchor(static_cast<int>(party_slot)), left,
+                                       row.top, right, row.bottom);
 }
 
 /* The per-frame combat-strip update: while combat mode is on, recompute each
@@ -5094,6 +5275,7 @@ void ClearPortraitRefreshSlot(int slot)
         g_level_block->portrait_refresh_mode[slot] = 0;
         g_level_block->portrait_refresh_image[slot] = 0;
         row = &g_main_game_invalidate_rects[slot];
+        CanvasDrawScope layout_scope(CanvasPartySlotAnchor(slot)); /* layout A */
         ClearSurfaceRect(row->left - 1, row->top, row->right + 1, row->bottom);
         InvalidateRegion(row->left - 1, row->top, row->right + 1, row->bottom, 1);
         RequestRedraw(1 << (slot & 0x1f));
@@ -5422,7 +5604,8 @@ unsigned char PortraitSelectRegionEvent(const InputAtom* event, W8Region* region
                (needed == W8_TARGET_NEED_CHARACTER_INDIRECT &&
                 (event->usKeyState & CTRL_DOWN) != 0)) {
         targeting = true;
-        IsDeadCharacterTargetable(slot);
+        /* Retail 0x565A04: the result is stored into aim_ok. */
+        aim_ok = IsDeadCharacterTargetable(slot);
     }
 
     us_event = event->usEvent;
@@ -6469,7 +6652,10 @@ static void ApplyPendingMouselook(void)
     } else if (elapsed > 9) {
         scale = g_float_one;
     }
-    if (g_mouselook_pending_pitch == g_float_zero && g_mouselook_pending_yaw == g_float_zero) {
+    /* Retail 0x568CB1/0x568CC4: fcomp 0.0; test ah,0x40 = equal-or-unordered, so a NaN
+       pending value counts as zero (written with < / > so NaN behaves like retail). */
+    if (!(g_mouselook_pending_pitch < g_float_zero || g_mouselook_pending_pitch > g_float_zero) &&
+        !(g_mouselook_pending_yaw < g_float_zero || g_mouselook_pending_yaw > g_float_zero)) {
         return;
     }
     if (g_settings.mouselook_smoothing == 0) {
@@ -6568,6 +6754,8 @@ void ApplyPendingTooltip(void)
             break;
         case 7:
             g_level_block->formation_highlight_party_slot = g_level_block->tooltip_subject;
+            /* Retail 0x569F3D jumps to 0x569EB6, past the RefreshFormationBoard call. */
+            refresh_formation = false;
             break;
         }
     }
@@ -7447,6 +7635,7 @@ void CloseMainGameOverlays(void)
 void ClearHighlightOverlayRegion(void)
 {
     if (g_main_game_mode == W8_MAIN_GAME_HIGHLIGHT_OVERLAY) {
+        CanvasDrawScope layout_scope(g_highlight_overlay_anchor); /* layout A */
         ClearSurfaceRect(g_level_block->dialogue_x, g_level_block->dialogue_y,
                          g_level_block->dialogue_x + g_level_block->dialogue_width,
                          g_level_block->dialogue_y + g_level_block->dialogue_height);
@@ -7589,7 +7778,8 @@ void ConfirmNpcTradeItem(void)
                 }
                 ++shown;
             }
-            if (index != -1) {
+            /* Retail 0x5AD4D7: scan exhausted -> jmp 0x5AD579, the stack update is skipped. */
+            if (index < 8) {
                 if (trading->backpack[index].stack_count > 0) {
                     trading->backpack[index].stack_count -=
                         static_cast<unsigned char>(g_npc_interaction_state->trade_quantity);
@@ -7619,7 +7809,8 @@ void ConfirmNpcTradeItem(void)
                     }
                     ++shown;
                 }
-                if (index != -1) {
+                /* Retail 0x5AD443/0x5AD47F: empty pool or scan exhausted -> skip the update. */
+                if (static_cast<unsigned int>(index) < g_status.party_item_count) {
                     if (g_status.party_item_pool[index].stack_count > 0) {
                         g_status.party_item_pool[index].stack_count -=
                             static_cast<unsigned char>(g_npc_interaction_state->trade_quantity);
@@ -8184,8 +8375,12 @@ void CreateSurpriseFade(void)
 
     SetFullscreenSceneLast(0);
     color.Set(0.0f, 0.0f, 0.0f, 0.0f);
-    g_surprise_fade_node = CreateColoredPolygonSprite(0x280, 0x1e0, &color, true);
-    Position2DNodeUnsnapped(g_surprise_fade_node, 0, 0);
+    /* Layout A: cover the whole wide canvas (retail: 640x480 window). */
+    g_surprise_fade_node = CreateColoredPolygonSprite(FullscreenQuadWidth(), 0x1e0, &color, true);
+    {
+        CanvasOriginScope quad_scope(FullscreenQuadOrigin());
+        Position2DNodeUnsnapped(g_surprise_fade_node, 0, 0);
+    }
     shader = static_cast<srMeshModel*>(g_surprise_fade_node->getModel())->getShader(0);
     shader.value = (shader.value & ~0x6040) | 0xa0;
     static_cast<srMeshModel*>(g_surprise_fade_node->getModel())->setShader(shader, 0);
@@ -8262,12 +8457,30 @@ unsigned char UpdateSurpriseFade(void)
         if (gXStatus.surprise_phase == 0) {
             w8_long pitch;
             void* pixels = LockCatalogFrameSurface(0x1e0, 0, &pitch);
-            srColorSurface* surface = SR_NEW(srColorSurface)(srPixelConvert::SURFACE_ARGB1555,
-                                                             pixels, 0x280, 0x1e0, pitch);
+            /* Mod (wide canvas): the camp picture is a full-screen render layer
+               (stSurface2D stretches the surface to 0..1 on both axes), not a
+               drawing in the 2D window. If a wide pair "Camping Screen_<W>.sti" exists,
+               a layer of width W comes from it (the buffer lives in wide_art while the layer lives).
+               No pair or W = 640 - the original 640x480 as before. */
+            void* overlay_pixels = pixels;
+            int overlay_width = 0x280;
+            w8_long overlay_pitch = pitch;
+            const unsigned short* wide_pixels = BuildWideFullscreenOverlay(
+                g_video_frames[g_video_slots[0x1e0].first_frame].path);
+            if (wide_pixels != 0) {
+                overlay_pixels = const_cast<unsigned short*>(wide_pixels);
+                overlay_width = g_canvas_w;
+                overlay_pitch = g_canvas_w * 2;
+            }
+            srColorSurface* surface =
+                SR_NEW(srColorSurface)(srPixelConvert::SURFACE_ARGB1555, overlay_pixels,
+                                       overlay_width, 0x1e0, overlay_pitch);
             g_surprise_snapshot_surface = surface;
-            g_surprise_snapshot_overlay = new stSurface2D(g_surprise_snapshot_surface, 0x280, 0x1e0,
-                                                          g_scene_fullscreen, 0x80);
-            g_surprise_snapshot_overlay->updateRectangle(g_gerd, pixels, pitch, 0, 0, 0x280, 0x1e0);
+            g_surprise_snapshot_overlay =
+                new stSurface2D(g_surprise_snapshot_surface, overlay_width, 0x1e0,
+                                g_scene_fullscreen, SurfaceTileExtent(overlay_width, 0x1e0));
+            g_surprise_snapshot_overlay->updateRectangle(g_gerd, overlay_pixels, overlay_pitch, 0,
+                                                         0, overlay_width, 0x1e0);
             UnlockCatalogFrameSurface(0x1e0, 0);
             g_world_render_enabled = 0;
             g_surprise_fade_tick_base = GetTickCount();

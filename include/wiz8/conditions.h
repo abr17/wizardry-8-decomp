@@ -1,7 +1,10 @@
 #pragma once
 
-/* Condition duration indices; the icon path maps live condition N to icon N-1. */
-enum W8Condition {
+/* Condition duration indices; the icon path maps live condition N to icon N-1.
+   Unsigned like the original DWORD fields: retail compares highest_condition
+   with jb/jae everywhere, so junk such as 0x80000000 counts as dead (found by
+   the w8diff harness in dozens of functions). */
+enum W8Condition : unsigned int {
     W8_CONDITION_NONE = 0,
     W8_CONDITION_DRAINED = 1,
     W8_CONDITION_DISEASED = 2,

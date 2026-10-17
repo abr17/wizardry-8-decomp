@@ -10,10 +10,13 @@
 #include "wiz8_crash_report.h"
 
 #include <windows.h>
+#include <stdio.h>
+
+extern "C" char gzErrorMsg[2048]; /* sgp.cpp: error text before exit() */
 
 namespace {
 
-const unsigned int kMaxCandidates = 32;
+const unsigned int kMaxCandidates = 200;
 
 W8CrashContextWriter g_context_writer = 0;
 unsigned long g_main_image_base = 0;
@@ -69,8 +72,8 @@ void ReportStackCandidates(unsigned long esp)
     }
     available = (unsigned long)memory.BaseAddress + memory.RegionSize - esp;
     words = available / sizeof(unsigned long);
-    if (words > 256) {
-        words = 256;
+    if (words > 8192) {
+        words = 8192;
     }
     for (index = 0; index < words; ++index) {
         _snprintf(source, sizeof(source), "stack+%x", index * sizeof(unsigned long));
@@ -87,6 +90,29 @@ LONG WINAPI W8ReportUnhandledException(EXCEPTION_POINTERS* exception)
     CONTEXT* context = exception->ContextRecord;
     const char* operation = "unknown";
     unsigned long access_address = 0;
+
+    /* Mod: a GUI program's stderr goes nowhere, so the report is written to
+       Wiz8Runtime.crash.txt and the minidump Wiz8Runtime.dmp next to the exe. */
+    {
+        char path[MAX_PATH];
+        DWORD n = GetModuleFileNameA(0, path, MAX_PATH);
+        while (n > 0 && path[n - 1] != '\\') --n;
+        path[n] = 0;
+        char txt[MAX_PATH], dmp[MAX_PATH];
+        _snprintf(txt, MAX_PATH, "%sWiz8Runtime.crash.txt", path);
+        _snprintf(dmp, MAX_PATH, "%sWiz8Runtime.dmp", path);
+        txt[MAX_PATH - 1] = dmp[MAX_PATH - 1] = 0;
+        freopen(txt, "a", stderr);
+        typedef BOOL(WINAPI * MiniDumpWriteDump_t)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+        HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
+        MiniDumpWriteDump_t write = dbghelp ? (MiniDumpWriteDump_t)GetProcAddress(dbghelp, "MiniDumpWriteDump") : 0;
+        HANDLE file = write ? CreateFileA(dmp, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0) : INVALID_HANDLE_VALUE;
+        if (file != INVALID_HANDLE_VALUE) {
+            struct { DWORD tid; EXCEPTION_POINTERS* ex; BOOL client; } info = {GetCurrentThreadId(), exception, FALSE};
+            write(GetCurrentProcess(), GetCurrentProcessId(), file, 0x1 /* MiniDumpWithDataSegs */, &info, 0, 0);
+            CloseHandle(file);
+        }
+    }
 
     if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2) {
         switch (record->ExceptionInformation[0]) {
@@ -138,10 +164,32 @@ LONG WINAPI W8ReportUnhandledException(EXCEPTION_POINTERS* exception)
 
 namespace {
 
+/* Mod: if the game ends via exit() (not a crash), record who
+   called it: return addresses from the stack, their offsets are looked up in Wiz8Runtime.map. */
+void LogExitStack()
+{
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(0, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != '\\') --n;
+    path[n] = 0;
+    char txt[MAX_PATH];
+    _snprintf(txt, MAX_PATH, "%sWiz8Runtime.exit.txt", path);
+    txt[MAX_PATH - 1] = 0;
+    if (!freopen(txt, "w", stderr)) return;
+    fprintf(stderr, "exit() called; message: %s\n", gzErrorMsg);
+    fprintf(stderr, "stack words pointing into the exe:\n");
+    g_main_image_base = (unsigned long)GetModuleHandleA(0);
+    g_candidate_count = 0;
+    volatile unsigned long marker = 0;
+    ReportStackCandidates((unsigned long)&marker);
+    fflush(stderr);
+}
+
 struct CrashReportInstaller {
     CrashReportInstaller()
     {
         SetUnhandledExceptionFilter(W8ReportUnhandledException);
+        atexit(LogExitStack);
     }
 };
 
@@ -152,4 +200,22 @@ CrashReportInstaller g_crash_report_installer;
 void W8SetCrashContextWriter(W8CrashContextWriter writer)
 {
     g_context_writer = writer;
+}
+
+/* Mod: stack snapshot (addresses inside the exe) to a file next to the exe, on request. */
+void W8DumpStackToFile(const char* file_name)
+{
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(0, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != '\\') --n;
+    path[n] = 0;
+    char txt[MAX_PATH];
+    _snprintf(txt, MAX_PATH, "%s%s", path, file_name);
+    txt[MAX_PATH - 1] = 0;
+    if (!freopen(txt, "w", stderr)) return;
+    g_main_image_base = (unsigned long)GetModuleHandleA(0);
+    g_candidate_count = 0;
+    volatile unsigned long marker = 0;
+    ReportStackCandidates((unsigned long)&marker);
+    fflush(stderr);
 }

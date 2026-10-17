@@ -24,6 +24,27 @@
 #include "input.h"
 #include <zmouse.h>
 #include "dbt.h"
+#include "Video2.h"
+#include "wiz8/canvas.h"
+
+/* Wide canvas: the wheel message carries the cursor in SCREEN pixels. Run it
+   through the same screen -> canvas -> game mapping as MouseHandler (client-
+   relative in windowed mode). With no mapping active (W = 640, MouseScale=0)
+   the raw lParam is passed on exactly as retail did. */
+static LPARAM WheelParamToGame(HWND hWindow, LPARAM lParam)
+{
+    if (!CanvasMouseMapActive())
+        return lParam;
+    POINT point;
+    point.x = GET_X_LPARAM(lParam);
+    point.y = GET_Y_LPARAM(lParam);
+    if (!VideoIsFullScreen())
+        ScreenToClient(hWindow, &point);
+    int game_x;
+    int game_y;
+    CanvasScreenToGame(point.x, point.y, &game_x, &game_y, 0);
+    return (LPARAM)(((UINT32)(UINT16)game_y << 16) | (UINT32)(UINT16)game_x);
+}
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -84,18 +105,32 @@ INT32 FAR PASCAL WindowProcedure(HWND hWindow, UINT16 Message, WPARAM wParam, LP
     // GLOBAL: WIZ8 0x00650db0
     static int fRestore = FALSE;
 
+    /* Borderless (wiz8wide.ini [Display]): after Alt+Tab the keyboard hook
+       never saw Alt (and maybe Shift/Ctrl) go up while the window was
+       inactive, so the game would treat it as still held. Reset the modifier
+       state when focus comes back. */
+    if (((Message == WM_ACTIVATEAPP && wParam) || Message == WM_SETFOCUS) &&
+        DisplayBorderlessEnabled()) {
+        gfShiftState = FALSE;
+        gfCtrlState = FALSE;
+        gfAltState = FALSE;
+        gfKeyState[VK_SHIFT] = FALSE;
+        gfKeyState[VK_CONTROL] = FALSE;
+        gfKeyState[VK_MENU] = FALSE;
+    }
+
     if (gfIgnoreMessages)
         return (DefWindowProc(hWindow, Message, wParam, lParam));
 
     // ATE: This is for older win95 or NT 3.51 to get MOUSE_WHEEL Messages
     if (Message == guiMouseWheelMsg) {
-        QueueEvent(MOUSE_WHEEL, wParam, lParam);
+        QueueEvent(MOUSE_WHEEL, wParam, WheelParamToGame(hWindow, lParam));
         return (0L);
     }
 
     switch (Message) {
     case WM_MOUSEWHEEL: {
-        QueueEvent(MOUSE_WHEEL, wParam, lParam);
+        QueueEvent(MOUSE_WHEEL, wParam, WheelParamToGame(hWindow, lParam));
         break;
     }
 
@@ -153,7 +188,8 @@ INT32 FAR PASCAL WindowProcedure(HWND hWindow, UINT16 Message, WPARAM wParam, LP
 
         // Calculate width as a factor of height
         if (fWidthByHeight) {
-            iWidth = iHeight * SCREEN_WIDTH / SCREEN_HEIGHT;
+            /* mod: canvas aspect (W x 480), not 4:3 - else dragging squashes the wide canvas */
+            iWidth = iHeight * g_canvas_w / SCREEN_HEIGHT;
             //				lpWindow->left = iX - iWidth/2;
             //				lpWindow->right = iX + iWidth / 2;
             if (fHoldRight)
@@ -162,7 +198,7 @@ INT32 FAR PASCAL WindowProcedure(HWND hWindow, UINT16 Message, WPARAM wParam, LP
                 lpWindow->right = lpWindow->left + iWidth;
         } else // Calculate height as a factor of width
         {
-            iHeight = iWidth * SCREEN_HEIGHT / SCREEN_WIDTH;
+            iHeight = iWidth * SCREEN_HEIGHT / g_canvas_w;
             //				lpWindow->top = iY - iHeight/2;
             //				lpWindow->bottom = iY + iHeight/2;
             lpWindow->bottom = lpWindow->top + iHeight;

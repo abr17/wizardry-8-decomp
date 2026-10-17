@@ -346,6 +346,10 @@ BOOLEAN SetPrimaryVideoSurfaces()
 
     ghFrameBuffer = CreateVideoSurfaceFromDDSurface(pSurface);
     CHECKF(ghFrameBuffer != NULL);
+    /* Wide canvas: FRAME_BUFFER is the centered 640x480 window of the W-wide
+       DirectDraw surface (LockPrimarySurface returns the window), so SGP clips
+       to 640. DirectDraw rect paths add the offset via FrameBufferRectToDD. */
+    ghFrameBuffer->usWidth = W8_GAME_W;
 
     return (TRUE);
 }
@@ -1613,9 +1617,23 @@ BOOLEAN ClipReleatedSrcAndDestRectangles(HVSURFACE hDestVSurface, HVSURFACE hSrc
     return (TRUE);
 }
 
+/* Wide canvas: a rectangle given in FRAME_BUFFER (640 window) coordinates,
+   moved to the real DirectDraw surface (ox pixels right). Other surfaces are
+   unchanged. */
+static void FrameBufferRectToDD(HVSURFACE hVSurface, RECT* rect)
+{
+    if (hVSurface == ghFrameBuffer) {
+        /* Layout A: the window start is the current 2D draw origin. */
+        rect->left += CanvasDrawOrigin();
+        rect->right += CanvasDrawOrigin();
+    }
+}
+
 BOOLEAN FillSurface(HVSURFACE hDestVSurface, blt_vs_fx* pBltFx)
 {
     DDBLTFX BlitterFX;
+    RECT window;
+    LPRECT fill_rect = NULL;
 
     Assert(hDestVSurface != NULL);
     CHECKF(pBltFx != NULL);
@@ -1623,7 +1641,17 @@ BOOLEAN FillSurface(HVSURFACE hDestVSurface, blt_vs_fx* pBltFx)
     BlitterFX.dwSize = sizeof(DDBLTFX);
     BlitterFX.dwFillColor = pBltFx->ColorFill;
 
-    DDBltSurface((LPDIRECTDRAWSURFACE2)hDestVSurface->pSurfaceData, NULL, NULL, NULL,
+    /* Wide canvas: "the whole frame buffer" is the 640x480 window only; the
+       side bars stay black. */
+    if (hDestVSurface == ghFrameBuffer && g_canvas_ox > 0) {
+        window.left = 0;
+        window.top = 0;
+        window.right = W8_GAME_W;
+        window.bottom = hDestVSurface->usHeight;
+        FrameBufferRectToDD(hDestVSurface, &window);
+        fill_rect = &window;
+    }
+    DDBltSurface((LPDIRECTDRAWSURFACE2)hDestVSurface->pSurfaceData, fill_rect, NULL, NULL,
                  DDBLT_COLORFILL, &BlitterFX);
 
     if (hDestVSurface->fFlags & VSURFACE_VIDEO_MEM_USAGE &&
@@ -1644,8 +1672,20 @@ BOOLEAN FillSurfaceRect(HVSURFACE hDestVSurface, blt_vs_fx* pBltFx)
     BlitterFX.dwSize = sizeof(DDBLTFX);
     BlitterFX.dwFillColor = pBltFx->ColorFill;
 
-    DDBltSurface((LPDIRECTDRAWSURFACE2)hDestVSurface->pSurfaceData, (LPRECT) & (pBltFx->FillRect),
-                 NULL, NULL, DDBLT_COLORFILL, &BlitterFX);
+    if (hDestVSurface == ghFrameBuffer && g_canvas_ox > 0) {
+        /* Wide canvas: game-space rectangle -> real surface (+ox). */
+        RECT fill;
+        fill.left = pBltFx->FillRect.iLeft;
+        fill.top = pBltFx->FillRect.iTop;
+        fill.right = pBltFx->FillRect.iRight;
+        fill.bottom = pBltFx->FillRect.iBottom;
+        FrameBufferRectToDD(hDestVSurface, &fill);
+        DDBltSurface((LPDIRECTDRAWSURFACE2)hDestVSurface->pSurfaceData, &fill, NULL, NULL,
+                     DDBLT_COLORFILL, &BlitterFX);
+    } else {
+        DDBltSurface((LPDIRECTDRAWSURFACE2)hDestVSurface->pSurfaceData,
+                     (LPRECT) & (pBltFx->FillRect), NULL, NULL, DDBLT_COLORFILL, &BlitterFX);
+    }
 
     if (hDestVSurface->fFlags & VSURFACE_VIDEO_MEM_USAGE &&
         !hDestVSurface->fFlags & VSURFACE_RESERVED_SURFACE) {
@@ -1686,8 +1726,15 @@ BOOLEAN BltVSurfaceUsingDD(HVSURFACE hDestVSurface, HVSURFACE hSrcVSurface, UINT
             uiDDFlags = DDBLTFAST_NOCOLORKEY;
         }
 
+        /* Wide canvas: FRAME_BUFFER coordinates are the 640 window. */
+        RECT FastSrcRect = *SrcRect;
+        FrameBufferRectToDD(hSrcVSurface, &FastSrcRect);
+        if (hDestVSurface == ghFrameBuffer) {
+            iDestX += CanvasDrawOrigin();
+        }
         DDBltFastSurface((LPDIRECTDRAWSURFACE2)hDestVSurface->pSurfaceData, iDestX, iDestY,
-                         (LPDIRECTDRAWSURFACE2)hSrcVSurface->pSurfaceData, SrcRect, uiDDFlags);
+                         (LPDIRECTDRAWSURFACE2)hSrcVSurface->pSurfaceData, &FastSrcRect,
+                         uiDDFlags);
 
     } else {
         // Normal, specialized blit for clipping, etc
@@ -1719,8 +1766,14 @@ BOOLEAN BltVSurfaceUsingDD(HVSURFACE hDestVSurface, HVSURFACE hSrcVSurface, UINT
 
         // Check for -ve values
 
+        /* Wide canvas: clipped in 640-window coordinates, then moved onto the
+           real surface when either side is FRAME_BUFFER. */
+        RECT DDSrcRect = *SrcRect;
+        FrameBufferRectToDD(hDestVSurface, &DestRect);
+        FrameBufferRectToDD(hSrcVSurface, &DDSrcRect);
         DDBltSurface((LPDIRECTDRAWSURFACE2)hDestVSurface->pSurfaceData, &DestRect,
-                     (LPDIRECTDRAWSURFACE2)hSrcVSurface->pSurfaceData, SrcRect, uiDDFlags, NULL);
+                     (LPDIRECTDRAWSURFACE2)hSrcVSurface->pSurfaceData, &DDSrcRect, uiDDFlags,
+                     NULL);
     }
 
     // Update backup surface with new data

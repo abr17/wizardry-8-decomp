@@ -99,6 +99,19 @@ public:
        enabled, push its text onto the SGP button. */
     void SetTooltipIndex(int tooltip_index);
 
+    /* Wide canvas layout A: stick this button to a canvas edge
+       (W8LayoutAnchor from wiz8/canvas.h). Its 640-space position stays;
+       hit test and drawing apply the edge shift. No-op while the layout is
+       off. */
+    void SetLayoutAnchor(int anchor)
+    {
+        SetButtonLayoutAnchor(m_button_handle, anchor);
+    }
+    int GetLayoutAnchor()
+    {
+        return GetButtonLayoutAnchor(m_button_handle);
+    }
+
     friend void DialogButtonCallback(GUI_BUTTON* button, INT32 reason);
 
 private:

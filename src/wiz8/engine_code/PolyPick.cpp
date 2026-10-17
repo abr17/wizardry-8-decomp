@@ -23,8 +23,12 @@ const float g_negative_quarter_turn = -1.570796012878418f;
 // FUNCTION: WIZ8 0x004BE420
 float GetHeadingAngle(const srVector3T<float>* source, const srVector3T<float>* target)
 {
-    float x = target->x - source->x;
-    float z = target->z - source->z;
+    /* Retail 0x004be424..0x004be42f subtracts on the x87 stack (fld / fsub dword) and
+       hands the unrounded differences to fpatan; rounding them to float first moves
+       the heading by an ulp when the two coordinates differ in exponent. Keep them in
+       double (found by the w8diff harness). */
+    double x = static_cast<double>(target->x) - static_cast<double>(source->x);
+    double z = static_cast<double>(target->z) - static_cast<double>(source->z);
 
     if (z == g_float_zero) {
         if (x > g_float_zero) {
@@ -47,14 +51,23 @@ float GetHeadingAngle(const srVector3T<float>* source, const srVector3T<float>* 
 // FUNCTION: WIZ8 0x004BE490
 float GetElevationAngle(const srVector3T<float>* source, const srVector3T<float>* target)
 {
-    srVector3T<float> delta = *target - *source;
-    float length = delta.Length();
+    /* Retail 0x004be498..0x004be4e2: only the y difference is stored as a float;
+       the x and z differences, the squares and the root stay on the x87 stack,
+       the root is compared with zero unrounded (zero or NaN returns zero) and is
+       rounded to float only for the division. A float-rounded length can move
+       acos' argument by an ulp, which a small elevation magnifies (found by the
+       w8diff harness through AdvanceMissileAI). */
+    double dx = static_cast<double>(target->x) - static_cast<double>(source->x);
+    float dy = target->y - source->y;
+    double dz = static_cast<double>(target->z) - static_cast<double>(source->z);
+    double root = sqrt(dz * dz + static_cast<double>(dy) * dy + dx * dx);
+    float length = static_cast<float>(root);
     float angle;
 
-    if (length == g_float_zero) {
+    if (!(root > g_float_zero)) {
         return g_float_zero;
     }
-    angle = static_cast<float>(acos(delta.y / length));
+    angle = static_cast<float>(acos(dy / length));
     if (!_finite(angle)) {
         return g_float_zero;
     }

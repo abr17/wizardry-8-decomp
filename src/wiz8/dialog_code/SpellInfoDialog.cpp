@@ -242,28 +242,35 @@ bool W8SpellInfoDialog::PopulateText()
         ui_units_lvl = ui_units;
         display_base = 0;
         if (duration_base > 0) {
+            int base_units;
             if (duration_base == 9999) {
-                ui_units_lvl = 0x129;
+                base_units = 0x129;
                 display_base = 0;
             } else if (duration_base * 10 < 300) {
-                ui_units_lvl = 0x123;
+                base_units = 0x123;
                 display_base = duration_base;
             } else if (duration_base * 0x78 < 0x3840) {
                 display_base = (duration_base * 10) / 0x3c;
-                ui_units_lvl = 0x125;
+                base_units = 0x125;
             } else {
                 display_base = (duration_base * 0x78) / 0xe10;
-                ui_units_lvl = 0x127;
+                base_units = 0x127;
             }
-            if (duration_per_level != 0 && ui_units != ui_units_lvl) {
+            /* Retail 0x005dc2dc: the base unit replaces the printed unit only when there is no
+               per-level part; otherwise it is only asserted against it and the per-level unit stays. */
+            if (duration_per_level == 0) {
+                ui_units_lvl = base_units;
+            } else if (ui_units != base_units) {
                 srAssertFail("uiUnits == uiUnitsLvl", SPELL_INFO_DIALOG_CPP, 0xc5,
                              FormatString("Spell %S duration has mismatched base & per-lvl units",
                                           record->display_name));
             }
             wcscat(text, FormatWideString(g_format_d_space, display_base));
         }
-        if ((duration_per_level == 1 && display_base == 0) ||
-            (duration_per_level == 0 && display_base == 1)) {
+        /* Retail 0x005dc344: reloads the raw +0x44 duration for the singular test and the
+           " / Power Level" test below (not the converted display value). */
+        if ((duration_per_level == 1 && duration_base == 0) ||
+            (duration_per_level == 0 && duration_base == 1)) {
             if (ui_units_lvl == 0x123) {
                 ui_units_lvl = 0x124;
             } else if (ui_units_lvl == 0x125) {
@@ -273,7 +280,7 @@ bool W8SpellInfoDialog::PopulateText()
             }
         }
         wcscat(text, gppStringList[ui_units_lvl]);
-        if (display_base > 0) {
+        if (duration_base > 0) {
             wcscat(text, gppStringList[0x12a]);
         }
         m_text_area.AddEntry(gppStringList[0x122], text, 10, 0xf, 0);

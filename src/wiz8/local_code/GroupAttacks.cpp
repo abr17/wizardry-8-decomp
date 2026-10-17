@@ -494,7 +494,9 @@ void SpawnSummonedMonsterGroup(int special_attack_kind, W8TargetSource* pSource,
         srAssertFail("pGroup", GROUP_ATTACKS_CPP, 600, 0);
     }
     MonsterInfoFromID(0x25a, GROUP_ATTACKS_CPP, group->leader_location_id, true);
-    monster_info = MonsterInfoFromID(0x25b, GROUP_ATTACKS_CPP, pAttackerSlot->iMonsterID, true);
+    /* Retail 0x00556BBB: the summoner is looked up via pSource->iMonsterID (arg 2); the
+       slot (arg 3) is only used for the spawn position and is -1 when aiming at a character. */
+    monster_info = MonsterInfoFromID(0x25b, GROUP_ATTACKS_CPP, pSource->iMonsterID, true);
     if (monster_info->ubDisposition == W8_DISPOSITION_FRIENDLY) {
         disposition = 2;
     } else {

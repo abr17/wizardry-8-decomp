@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/spell_ids.h"
 #include "wiz8/sgp_text.h"
 #include "wiz8/local_screens/MGSPortraits.h"
@@ -218,6 +219,8 @@ void RecordCharacterDamage(int party_slot, unsigned int amount)
 // FUNCTION: WIZ8 0x0059ADD0
 static void DrawDamageSplatOverlay(unsigned int party_slot)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(static_cast<int>(party_slot))); /* layout A: slot column */
+
     W8MonsterManagerEntry* entry = &gXStatus.monster_manager_entries[party_slot];
     int frame = entry->damage_splat_frame;
     int top = 0;
@@ -265,6 +268,8 @@ static void DrawDamageSplatOverlay(unsigned int party_slot)
 // FUNCTION: WIZ8 0x0059B0F0
 void DrawPortraitEffectIcon(unsigned int party_slot)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(static_cast<int>(party_slot))); /* layout A: slot column */
+
     int image = gXStatus.monster_manager_entries[party_slot].effect_icon_frame;
     int top = 0;
     if (image != -1) {
@@ -386,6 +391,7 @@ void RedrawCombatPortraits(void)
             !entry->combat_portrait_dirty || slot == g_level_block->combat_slot) {
             continue;
         }
+        CanvasDrawScope layout_scope(CanvasPartySlotAnchor(slot)); /* layout A: slot column */
         if ((slot & 1) == 0) {
             portrait_x = 0x19;
             badge_x = 0x19;
@@ -531,6 +537,8 @@ void GetPartySlotMenuAnchor(int party_slot, int* menu_x, int* menu_y, int* band_
 // FUNCTION: WIZ8 0x0059A540
 void RedrawPartyPortraitBars(unsigned int party_slot, bool slot_enabled)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(static_cast<int>(party_slot))); /* layout A: slot column */
+
     W8MonsterManagerEntry* entry = &gXStatus.monster_manager_entries[party_slot];
     W8Character* character = &g_status.buffers.Char[party_slot];
     int menu_x;
@@ -669,6 +677,8 @@ void StageMonsterCastIcon(unsigned int party_slot, W8SpellRealm realm, bool alte
 // FUNCTION: WIZ8 0x005993A0
 bool PreparePartyPortraitOverlay(unsigned int party_slot, unsigned int left, unsigned int top)
 {
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(static_cast<int>(party_slot))); /* layout A: slot column */
+
     if (gXStatus.fNpcDialogueMode && (party_slot & 1) != 0 &&
         IsPortraitObscuredByNpcDialogue(party_slot)) {
         return false;
@@ -731,6 +741,7 @@ void RedrawPartyPortraitOverlay(unsigned int party_slot, bool highlighted, bool 
         IsPortraitObscuredByNpcDialogue(party_slot);
     }
 
+    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(static_cast<int>(party_slot))); /* layout A: slot column */
     GetPartySlotMenuAnchor(party_slot, &menu_x, &menu_y, &band_menu_edge, &band_portrait_edge,
                            &grid_row, &column_x, slot_enabled);
 
@@ -975,7 +986,8 @@ draw_condition_icons:
         if (g_level_block->enchantment_hover_party_slot == static_cast<int>(party_slot)) {
             DrawCatalogImage(FRAME_BUFFER, 0x60, 0, 0, right_condition_x - 1, menu_y + 2,
                              VO_BLT_SRCTRANSPARENCY, 0);
-        } else if (character->highest_condition != W8_CONDITION_NONE) {
+        } else if (character->enchantment_top != W8_ENCHANTMENT_NONE) {
+            /* Retail 0x00599E57: the enchantment-orb ring tests enchantment_top (+0xB05). */
             DrawCatalogImage(FRAME_BUFFER, 0x61, 0, 0, right_condition_x - 1, menu_y + 2,
                              VO_BLT_SRCTRANSPARENCY, 0);
         }
@@ -1008,46 +1020,50 @@ draw_condition_icons:
             DrawCatalogImage(FRAME_BUFFER, assay_catalog, 0, 0, band_menu_edge + 1, assay_y,
                              VO_BLT_SRCTRANSPARENCY, 0);
         }
-    }
 
-portrait_fx:
-    if (entry->damage_splat_active) {
-        DrawDamageSplatOverlay(party_slot);
-    }
-    if (entry->effect_icon_active) {
-        DrawPortraitEffectIcon(party_slot);
-    }
-
-    if (g_level_block->vitals_hover_party_slot == static_cast<int>(party_slot)) {
-        int hp_overlay_y;
-        int hp_overlay_x;
-        int hp_overlay_catalog;
-
-        if (g_settings.numeric_hit_points == 0) {
-            hp_overlay_y = menu_y + 0x15;
-            hp_overlay_x = band_portrait_edge + 3;
-            hp_overlay_catalog = 100;
-        } else {
-            hp_overlay_y = menu_y + 0xe;
-            hp_overlay_catalog = 0x65;
-            hp_overlay_x = band_portrait_edge;
+    portrait_fx:
+        /* Retail 0x00599F52..0x00599FD4: splat, effect icon and vitals-hover frame are
+           reached only inside the fOccupied && MAIN_GAME block. */
+        if (entry->damage_splat_active) {
+            DrawDamageSplatOverlay(party_slot);
         }
-        DrawCatalogImage(FRAME_BUFFER, hp_overlay_catalog, 0, 0, hp_overlay_x, hp_overlay_y,
-                         VO_BLT_SRCTRANSPARENCY, 0);
-    }
+        if (entry->effect_icon_active) {
+            DrawPortraitEffectIcon(party_slot);
+        }
+
+        if (g_level_block->vitals_hover_party_slot == static_cast<int>(party_slot)) {
+            int hp_overlay_y;
+            int hp_overlay_x;
+            int hp_overlay_catalog;
+
+            if (g_settings.numeric_hit_points == 0) {
+                hp_overlay_y = menu_y + 0x15;
+                hp_overlay_x = band_portrait_edge + 3;
+                hp_overlay_catalog = 100;
+            } else {
+                hp_overlay_y = menu_y + 0xe;
+                hp_overlay_catalog = 0x65;
+                hp_overlay_x = band_portrait_edge;
+            }
+            DrawCatalogImage(FRAME_BUFFER, hp_overlay_catalog, 0, 0, hp_overlay_x, hp_overlay_y,
+                             VO_BLT_SRCTRANSPARENCY, 0);
+        }
+    } /* end if (fOccupied && MAIN_GAME); retail 0x00599FD7 follows */
 
     if (!gXStatus.fCombatMode && party_slot < 8 && party_row->fOccupied) {
         g_portrait_controls[party_slot]->Invalidate(false);
     }
 
-    if (g_level_block->portrait_overlay_party_slot == static_cast<int>(party_slot)) {
-        DrawPortraitConditionOverlay(g_level_block->portrait_overlay_party_slot);
-    }
+    /* Retail 0x0059A003: +0x204 -> Condition, +0x208 -> Enchantment, +0x200 -> Vitals,
+       +0x20C -> Status (same pairing as RefreshTrackedPortraitOverlay). */
     if (g_level_block->condition_orb_party_slot == static_cast<int>(party_slot)) {
-        DrawPortraitEnchantmentOverlay(g_level_block->condition_orb_party_slot);
+        DrawPortraitConditionOverlay(g_level_block->condition_orb_party_slot);
     }
     if (g_level_block->enchantment_orb_party_slot == static_cast<int>(party_slot)) {
-        DrawPortraitVitalsOverlay(g_level_block->enchantment_orb_party_slot);
+        DrawPortraitEnchantmentOverlay(g_level_block->enchantment_orb_party_slot);
+    }
+    if (g_level_block->portrait_overlay_party_slot == static_cast<int>(party_slot)) {
+        DrawPortraitVitalsOverlay(g_level_block->portrait_overlay_party_slot);
     }
     if (g_level_block->condition_highlight_party_slot == static_cast<int>(party_slot)) {
         DrawPortraitStatusOverlay(g_level_block->condition_highlight_party_slot);
@@ -1413,6 +1429,7 @@ void UpdateConditionButtons(void)
                 button->Invalidate(false);
                 if (g_level_block->portrait_refresh_pending[slot] == 0 &&
                     !entry->keyboard_menu_open) {
+                    CanvasDrawScope layout_scope(CanvasPartySlotAnchor(slot)); /* layout A */
                     ClearSurfaceRect(button->m_left + g_condition_buttons_panel->m_bounds.left,
                                      button->m_top + g_condition_buttons_panel->m_bounds.top,
                                      button->m_right + g_condition_buttons_panel->m_bounds.left,

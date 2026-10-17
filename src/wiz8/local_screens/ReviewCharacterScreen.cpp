@@ -1,4 +1,5 @@
 #include <windows.h>
+#include "wiz8/canvas.h"
 #include "wiz8/spell_ids.h"
 #include "wiz8/conditions.h"
 #include "wiz8/sgp_text.h"
@@ -90,6 +91,7 @@
 #include "wiz8/layouts/gameplay_databases.h"
 #include "wiz8/local_code/Gameloop.h"
 #include "wiz8/local_screens/OptionsScreen.h"
+#include "wiz8/local_screens/MainGameLayout.h"
 
 /* Local Screens\ReviewCharacterScreen.cpp, named by entry's
    fFoundEquipChar assertion. This is state 6, reached both from the party
@@ -1305,7 +1307,8 @@ unsigned char CampScreenEnter(void)
         }
         memset(g_camp_screen, 0, sizeof(W8CampScreenState));
     }
-    SetClippingRegionAndImageWidth(0x500, 0, 0, 0x280, 0x1e0);
+    /* wide canvas: real pitch */
+    SetClippingRegionAndImageWidth(CanvasFrameBufferPitch(), 0, 0, 0x280, 0x1e0);
     g_camp_screen->item_action = initial_item_action;
     MSYS_Init();
     for (unsigned int filter = 0; filter < W8_CAMP_ITEM_FILTER_COUNT; ++filter) {
@@ -2589,8 +2592,13 @@ void BeginScreenFade(int fade_to_black, int fade_out, int duration, void (*callb
         color.z = 0.0f;
     }
     color.w = 1.0f;
-    g_fade_overlay = CreateColoredPolygonSprite(0x280, 0x1e0, &color, true);
-    Position2DNodeUnsnapped(g_fade_overlay, 0, 0);
+    /* Layout A: the quad covers the whole wide canvas, HUD side bars included
+       (retail / no layout: 640x480 at the centered window, as before). */
+    g_fade_overlay = CreateColoredPolygonSprite(FullscreenQuadWidth(), 0x1e0, &color, true);
+    {
+        CanvasOriginScope quad_scope(FullscreenQuadOrigin());
+        Position2DNodeUnsnapped(g_fade_overlay, 0, 0);
+    }
     shader = static_cast<srMeshModel*>(g_fade_overlay->getModel())->getShader(0);
     if (fade_to_black == 0) {
         shader.value = (shader.value & ~0x6040) | 0xa0;
@@ -2724,6 +2732,7 @@ void DrawPartyDeathScreen(void)
 {
     const wchar_t* text;
 
+    ClearCanvasForFullscreenArt(); /* layout A: wipe the HUD in the side bars */
     DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x1df, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
     if (gXStatus.party_moving) {
         text = gppStringList[0x777];
@@ -2811,6 +2820,7 @@ void ShowEndingScreen(void)
         sound = "";
         text[0] = 0;
     }
+    ClearCanvasForFullscreenArt(); /* layout A: wipe the HUD in the side bars */
     DrawCatalogImageAndInvalidate(FRAME_BUFFER, image, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
     bounds.left = 0x46;
     bounds.top = 0;

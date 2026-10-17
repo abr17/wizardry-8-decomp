@@ -208,8 +208,11 @@ void ApplyRolledHealthChangeToParty(const W8Dice* dice, W8SpellEffectResult* res
     int party_slot;
 
     for (party_slot = 0; party_slot < 8; ++party_slot) {
+        /* Retail 0x0052A83F compares the condition unsigned (cmp 0x12 / jae; found by
+           the w8diff harness, like every highest_condition test in this file). */
         if (g_status.buffers.XChar[party_slot].fOccupied &&
-            g_status.buffers.Char[party_slot].highest_condition < W8_CONDITION_DEAD) {
+            static_cast<unsigned int>(g_status.buffers.Char[party_slot].highest_condition) <
+                W8_CONDITION_DEAD) {
             ApplyDamageToCharacter(party_slot, RollDice(dice), false, announce, false, result,
                                    false);
         }
@@ -307,8 +310,10 @@ void RestorePartySpellPoints(int amount)
     int granted;
 
     for (party_slot = 0; party_slot < 8; ++party_slot) {
+        /* Retail 0x0052BA1F: cmp 0x12 / jae, unsigned (w8diff harness). */
         if (g_status.buffers.XChar[party_slot].fOccupied &&
-            g_status.buffers.Char[party_slot].highest_condition < W8_CONDITION_DEAD &&
+            static_cast<unsigned int>(g_status.buffers.Char[party_slot].highest_condition) <
+                W8_CONDITION_DEAD &&
             g_status.buffers.Char[party_slot].hp_current != 0) {
             granted = amount;
             if (amount < 0) {
@@ -342,7 +347,9 @@ void DamageMonstersInRadius(const srVector3T<float>& center, float radius, const
             MonsterGetLocation(monster_info->p3D, &location);
             offset = srVector3T<float>(center.x - location.x, center.y - location.y,
                                        center.z - location.z);
-            if (offset.Length() <= radius) {
+            /* Retail 0x0052BB0E: FNSTSW/TEST AH,0x41 skips only when distance > radius;
+               written as !(a > b) so an unordered (NaN) distance counts as inside. */
+            if (!(offset.Length() > radius)) {
                 damage = RollDice(dice);
                 ApplyDamageToMonster(monster_info, damage, source, false, 1, 0, result, false);
             }
@@ -396,9 +403,13 @@ unsigned int ApplyDamageToMonster(W8MonsterInfo* monster_info, unsigned int amou
             }
             if (in_combat != 0) {
                 if (c) {
-                    ShowNoticef(category, FormatWideString(g_format_s_space_s,
-                                                           GetMonsterName(monster_info, 0, 0),
-                                                           gppStringList[0x268], amount));
+                    /* Retail 0x0052BC7B: "<name> <str 0x268>" still holds %ld; amount is
+                       passed to ShowNoticef for it, not to FormatWideString. */
+                    ShowNoticef(category,
+                                FormatWideString(g_format_s_space_s,
+                                                 GetMonsterName(monster_info, 0, 0),
+                                                 gppStringList[0x268]),
+                                amount);
                 } else if (a != 0) {
                     ShowNoticef(category, gppStringList[0x254], amount);
                 } else {
@@ -644,7 +655,10 @@ void RestoreCharacterStamina(int party_slot, int amount, bool announce)
     int previous_band;
     int band;
 
-    if (character->highest_condition >= W8_CONDITION_DEAD || character->hp_current == 0) {
+    /* Found by the w8diff harness: retail 0x0052B1DE (cmp 0x12 / jae) is unsigned,
+       so a stored condition of 0x80000000 or -1 counts as dead and returns. */
+    if (static_cast<unsigned int>(character->highest_condition) >= W8_CONDITION_DEAD ||
+        character->hp_current == 0) {
         return;
     }
     stamina_max = character->uiStaminaMax;
@@ -866,7 +880,9 @@ void RestoreMonsterStamina(W8MonsterInfo* monster_info, int amount, bool announc
 {
     unsigned int stamina_max;
 
-    if (monster_info->highest_condition >= W8_CONDITION_DEAD || monster_info->hp_current == 0) {
+    /* Found by the w8diff harness: retail 0x0052C145 (cmp 0x12 / jae) is unsigned. */
+    if (static_cast<unsigned int>(monster_info->highest_condition) >= W8_CONDITION_DEAD ||
+        monster_info->hp_current == 0) {
         return;
     }
     stamina_max = monster_info->stamina_max;
@@ -956,9 +972,6 @@ void FatigueCharacter(int party_slot, int amount, bool scale_by_load,
         return;
     }
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored                                                                   \
-    "-Wsometimes-uninitialized" // uninit-ok: retail's invalid-load assertion continues without assigning a percentage; that unresolved value still affects stamina
     if (scale_by_load) {
         switch (character->load_category) {
         case 0:
@@ -979,6 +992,9 @@ void FatigueCharacter(int party_slot, int amount, bool scale_by_load,
         default:
             srAssertFail("FALSE", HEALTH_STAMINA_MANA_CPP, 813,
                          "FatigueCharacter: ERROR - Invalid load category");
+            /* Retail 0x0052AFF1: reloads the scale_by_load argument slot as the
+               percentage; every retail caller passing true pushes 1. */
+            load_percent = static_cast<int>(scale_by_load);
             break;
         }
         if (character->uiCondition[W8_CONDITION_SLOWED] == 0) {
@@ -990,7 +1006,6 @@ void FatigueCharacter(int party_slot, int amount, bool scale_by_load,
         }
         amount += (load_percent * amount) / 100;
     }
-#pragma clang diagnostic pop
 
     if (amount < 0) {
         amount = 0;
@@ -1222,7 +1237,10 @@ void RecalculateCharacterHitPoints(W8Character* character)
         }
     }
 
-    hit_points = static_cast<int>(total + 0.5) + character->hp_adjustment;
+    /* Found by the w8diff harness: retail 0x0052A374 converts with __ftol, a 64-bit
+       truncation whose low dword is kept, so a total past 2^31 wraps instead of
+       becoming 0x80000000 as a direct double-to-int conversion does. */
+    hit_points = static_cast<int>(static_cast<long long>(total + 0.5)) + character->hp_adjustment;
     if (hit_points < 1) {
         hit_points = 1;
     }
@@ -1252,13 +1270,19 @@ void RecalculateCharacterHitPoints(W8Character* character)
 void RecalculateCharacterStamina(W8Character* character)
 {
     unsigned int previous = character->uiStaminaMax;
-    unsigned int value = static_cast<unsigned int>(
-        ((character->attributes[W8_ATTRIBUTE_STRENGTH].effective +
-          character->attributes[W8_ATTRIBUTE_PIETY].effective +
-          character->attributes[W8_ATTRIBUTE_VITALITY].effective) *
-         (1.0f / 3.0f)) *
-            (character->uiExpLevel * g_item_weight_display_scale + g_environment_near_scale) +
-        g_double_half);
+    /* Found by the w8diff harness: retail 0x0052A3E8..0x0052A445 widens the attribute
+       sum and the level through zeroed high dwords (fild qword, unsigned), keeps both
+       products on the x87 stack and __ftol's the result to its low dword. Float
+       products lost the low bits of large sums, and a direct conversion of a result
+       past 2^32 did not wrap. */
+    unsigned int attribute_sum = character->attributes[W8_ATTRIBUTE_STRENGTH].effective +
+                                 character->attributes[W8_ATTRIBUTE_PIETY].effective +
+                                 character->attributes[W8_ATTRIBUTE_VITALITY].effective;
+    unsigned int value = static_cast<unsigned int>(static_cast<long long>(
+        static_cast<double>(attribute_sum) * (1.0f / 3.0f) *
+            (static_cast<double>(character->uiExpLevel) * g_item_weight_display_scale +
+             g_environment_near_scale) +
+        g_double_half));
     character->uiStaminaMax = value;
     if (character->fatigue_penalty < value) {
         character->uiStaminaMax = value - character->fatigue_penalty;
@@ -1308,10 +1332,19 @@ void RecalculateRealmSpellPoints(W8Character* character)
 // FUNCTION: WIZ8 0x0052a540
 int RebuildRealmSpellPointCeilings(W8Character* character)
 {
-    int max_spell_levels[6];
-    int realm_skills[4];
+    /* Found by the w8diff harness: retail 0x0052A540 works unsigned and on the x87
+       stack throughout. The skill levels are shifted with shr; the smallest one is
+       loaded through a zeroed high dword (fild qword) and the other three are added
+       with fiadd, i.e. as signed dwords (0x0052A5E1..0x0052A61C). Per realm,
+       0x0052A65C..0x0052A6A7 loads skill*3 unsigned, fiadds piety (signed), adds the
+       weighted term, multiplies by 0.02f, fimuls the signed dword learned+level+1,
+       adds 0.5 and __ftol's to the low dword; the best value, the cost maxima and the
+       ceiling floor are compared unsigned (jbe/jae). Float intermediates, int shifts
+       and signed compares gave other ceilings and return values for large inputs. */
+    unsigned int max_spell_levels[6];
+    unsigned int realm_skills[4];
     int index;
-    int best = 0;
+    unsigned int best = 0;
 
     RecountLearnedSpellsByRealm(character);
     for (index = 0; index < 6; ++index) {
@@ -1320,7 +1353,7 @@ int RebuildRealmSpellPointCeilings(W8Character* character)
     for (index = 0; index < 0x72; ++index) {
         if (character->spell_learned[index] == 1 || character->spell_learned[index] == 2) {
             W8SpellRealm realm = g_spell_records[index].realm;
-            int cost = g_spell_records[index].spell_point_cost;
+            unsigned int cost = static_cast<unsigned int>(g_spell_records[index].spell_point_cost);
             if (max_spell_levels[realm] < cost) {
                 max_spell_levels[realm] = cost;
             }
@@ -1331,8 +1364,10 @@ int RebuildRealmSpellPointCeilings(W8Character* character)
     }
     qsort(realm_skills, 4, sizeof(realm_skills[0]), CompareUnsignedDescending);
 
-    float weighted = static_cast<float>(realm_skills[0] + (realm_skills[1] >> 1) +
-                                        (realm_skills[2] >> 2) + (realm_skills[3] >> 3));
+    double weighted = static_cast<double>(realm_skills[3] >> 3);
+    weighted += static_cast<int>(realm_skills[2] >> 2);
+    weighted += static_cast<int>(realm_skills[1] >> 1);
+    weighted += static_cast<int>(realm_skills[0]);
     if (weighted > 125.0f) {
         weighted = 125.0f;
     }
@@ -1340,27 +1375,28 @@ int RebuildRealmSpellPointCeilings(W8Character* character)
     for (index = 0; index < 6; ++index) {
         int old = character->sp_max[index];
         unsigned int learned = character->skill_unlocks[0x1c + index];
-        int computed =
-            static_cast<int>(((weighted + character->skills[W8_SKILL_FIRE_MAGIC + index].level * 3 +
-                               character->attributes[W8_ATTRIBUTE_PIETY].effective) *
-                              g_float_two_hundredths) *
-                                 (learned + character->uiExpLevel + 1) +
-                             g_double_half);
+        double scaled =
+            static_cast<double>(character->skills[W8_SKILL_FIRE_MAGIC + index].level * 3) +
+            static_cast<int>(character->attributes[W8_ATTRIBUTE_PIETY].effective);
+        scaled = (scaled + weighted) * g_float_two_hundredths *
+                 static_cast<int>(learned + character->uiExpLevel + 1);
+        unsigned int computed =
+            static_cast<unsigned int>(static_cast<long long>(scaled + g_double_half));
         if (best < computed) {
             best = computed;
         }
         if (learned == 0) {
             computed = 0;
         }
-        character->sp_max[index] = computed;
+        character->sp_max[index] = static_cast<int>(computed);
         if (computed < max_spell_levels[index]) {
-            character->sp_max[index] = max_spell_levels[index];
+            character->sp_max[index] = static_cast<int>(max_spell_levels[index]);
         }
         if (character->sp_max[index] != old) {
             character->iSPLeft[index] += character->sp_max[index] - old;
         }
     }
-    return best;
+    return static_cast<int>(best);
 }
 
 // FUNCTION: WIZ8 0x0052a760
@@ -1383,8 +1419,9 @@ unsigned int FindPartySlotWithLowestHitPoints(void)
 
     for (unsigned int slot = 0; slot < 8; ++slot) {
         W8Character* character = &g_status.buffers.Char[slot];
+        /* Found by the w8diff harness: retail 0x0052C373 (cmp 0x12 / jae) is unsigned. */
         if (g_status.buffers.XChar[slot].fOccupied &&
-            character->highest_condition < W8_CONDITION_DEAD) {
+            static_cast<unsigned int>(character->highest_condition) < W8_CONDITION_DEAD) {
             unsigned int percent =
                 (character->hp_current * 100) / static_cast<unsigned int>(character->uiHPMax);
             if (percent < best_percent) {
@@ -1407,8 +1444,9 @@ unsigned int FindPartySlotWithLowestSpellPoints(void)
 
     for (unsigned int slot = 0; slot < 8; ++slot) {
         W8Character* character = &g_status.buffers.Char[slot];
+        /* Retail 0x0052C3E7: cmp 0x12 / jae, unsigned (w8diff harness). */
         if (g_status.buffers.XChar[slot].fOccupied &&
-            character->highest_condition < W8_CONDITION_DEAD) {
+            static_cast<unsigned int>(character->highest_condition) < W8_CONDITION_DEAD) {
             unsigned int pool_max = SumCharacterSpellPoints(character);
             if (pool_max > 0) {
                 int pool_left = SumCharacterSpellPointsLeft(character);
@@ -1448,8 +1486,9 @@ W8Character* FindPartyMemberWithLowestResistance4(void)
     int selected = 0;
     for (int party_slot = 0; party_slot < 8; ++party_slot) {
         W8Character* character = &g_status.buffers.Char[party_slot];
+        /* Retail 0x0052C4A7: cmp 0x12 / jae, unsigned (w8diff harness). */
         if (g_status.buffers.XChar[party_slot].fOccupied &&
-            character->highest_condition < W8_CONDITION_DEAD &&
+            static_cast<unsigned int>(character->highest_condition) < W8_CONDITION_DEAD &&
             character->resistances[4].total < lowest) {
             selected = party_slot;
             lowest = character->resistances[4].total;

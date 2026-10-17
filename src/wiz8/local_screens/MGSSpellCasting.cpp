@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/spell_ids.h"
 #include "wiz8/local_screens/MGSSpellCasting.h"
 #include "wiz8/integer_constants.h"
@@ -223,6 +224,15 @@ static void CreateSpellCastingViewControls(void)
     gpSCSV->power_controls[W8_SPELL_CANCEL_CONTROL]->m_primaryActivationCallback =
         ResetSpellCastingSelection;
 
+    /* Wide canvas, layout A (2026-10-12): magic school buttons - at the left
+       canvas edge (in place of the radar), power orbs, name and cancel - at the right
+       (in place of the formation board), the middle with the spell list is stretched
+       by 2*ox, like the log; the text window itself is widened in OpenSpellCastingView.
+       Outside the layout (W = 640, camp) shifts are zero. */
+    PlaceSubscreenPanel(gpSCSV->panels[0], W8_SUBSCREEN_LEFT);
+    PlaceSubscreenPanel(gpSCSV->panels[1], W8_SUBSCREEN_STRETCH);
+    PlaceSubscreenPanel(gpSCSV->panels[2], W8_SUBSCREEN_RIGHT);
+
     gpSCSV->panels[0]->SetEnabled(true);
     gpSCSV->panels[1]->SetEnabled(true);
     gpSCSV->panels[2]->SetEnabled(true);
@@ -305,7 +315,10 @@ unsigned char OpenSpellCastingView(int party_slot)
     SelectTextBox(2);
     ResetEditorStatusLine(-1);
     g_level_block->text_box_visible = false;
-    SetTextBoxRegionBounds(0xea, 0x16e, 0x18c, 0x1ba);
+    /* Original: (0xea, 0x16e) - (0x18c, 0x1ba). Layout A: the spell list is
+       wider by ox on each side (the stretched middle of the subscreen); the lines
+       "(target) name" and the cost on the right spread further apart. */
+    SetTextBoxRegionBounds(MainGameWideLeft(0xea), 0x16e, MainGameWideRight(0x18c), 0x1ba);
     gpSCSV->iSpellRealm = W8_SPELL_REALM_NONE;
     SelectSpellCastingPartySlot(party_slot);
     gpSCSV->selected_spell_index = -1;
@@ -343,7 +356,7 @@ void CloseSpellCastingView(void)
         g_level_block->text_box_visible = true;
         SelectTextBox(gXStatus.fCombatMode);
         ReleaseSpellCastingViewControls();
-        SetTextBoxRegionBounds(0xa8, 0x16e, 0x1c4, 0x1ba);
+        SetMainTextBoxRegionBounds(); /* layout A: widened log */
         gXStatus.fSpellCastMode = false;
         ApplyMainGameModeFlag(gpSCSV->saved_game_mode, true);
         RequestRedraw(W8_MAIN_REDRAW_LAYOUT);
@@ -1046,6 +1059,8 @@ static void PreviewSpellPowerPipHover(int power_level)
                                    gpSCSV->power_controls[power_level]->m_enabled))) {
             spell_name = gpSCSV->power_controls[W8_SPELL_NAME_CONTROL];
             panel = gpSCSV->panels[2];
+            /* Layout A: the name plate - in the right panel at the canvas edge. */
+            CanvasDrawScope layout_scope(panel->m_layoutAnchor);
             ColorFillVideoSurfaceArea(
                 FRAME_BUFFER, spell_name->m_left + panel->m_bounds.left,
                 spell_name->m_top + panel->m_bounds.top, spell_name->m_right + panel->m_bounds.left,

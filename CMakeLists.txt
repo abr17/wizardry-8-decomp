@@ -2,9 +2,21 @@ cmake_minimum_required(VERSION 3.20)
 
 project(wizardry8_decomp LANGUAGES C CXX)
 
+# Modern-MSVC port (VS 2022, x86): builds only the game executable against the
+# retail SR.dll / Mss32.dll / binkw32.dll. Detected from the compiler version so
+# the original VC6 path stays untouched when MSVC 6 is used.
+if(MSVC AND MSVC_VERSION GREATER_EQUAL 1900)
+    set(WIZ8_MODERN_MSVC ON)
+else()
+    set(WIZ8_MODERN_MSVC OFF)
+endif()
+
 # Global policy only: shared compile settings and immediate lint configuration.
 # Component sources, includes, defines and products belong to the component
 # directory, never here.
+if(WIZ8_MODERN_MSVC)
+    include(cmake/ModernMsvc.cmake)
+endif()
 include(cmake/CompileSettings.cmake)
 include(cmake/Lint.cmake)
 
@@ -20,16 +32,10 @@ if(NOT WIZ8_ANALYSIS_BUILD)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     include(cmake/ProductSupport.cmake)
-    include(cmake/Reccmp.cmake)
 endif()
 
 add_subdirectory(src/sgp)
-add_subdirectory(src/surrender)
-add_subdirectory(src/srext_jpegimporter)
+# msvc2022 port: SURRENDER (partial sr.dll), srext_jpegimporter, srext_unzip,
+# tests/differential and reccmp are not built - the exe uses the retail DLLs and
+# the IJG jpeg / unzip sources are not available here.
 add_subdirectory(src/wiz8)
-add_subdirectory(src/srext_unzip)
-add_subdirectory(tests/differential)
-
-if(NOT WIZ8_ANALYSIS_BUILD)
-    reccmp_configure(SURRENDER SREXT_JPEGIMPORTER WIZ8 SREXT_UNZIP)
-endif()

@@ -98,15 +98,15 @@ void stTextureAnim::UpdateFrame()
     }
 
     if (trigger_mode == W8_TEXTURE_TRIGGER_RANDOM_FRAME) {
-        if (rand() / static_cast<float>(RAND_MAX) < probability) {
+        if (rand() * 3.0518509447574615e-05f /* retail 0x005ec1e4: 1/32767 */ < probability) {
             this->frame =
-                static_cast<int>(rand() / static_cast<float>(RAND_MAX) * textures->GetCount());
+                static_cast<int>(rand() * 3.0518509447574615e-05f /* retail 0x005ec1e4: 1/32767 */ * textures->GetCount());
         }
         return;
     }
 
     if (trigger_mode == W8_TEXTURE_TRIGGER_RANDOM_START) {
-        if (!running && rand() / static_cast<float>(RAND_MAX) < probability) {
+        if (!running && rand() * 3.0518509447574615e-05f /* retail 0x005ec1e4: 1/32767 */ < probability) {
             running = true;
             direction = 0;
             this->frame = 0;

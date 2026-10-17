@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/sgp_text.h"
 #include "wiz8/local_screens/MGSButtons.h"
 #include "wiz8/layouts/character.h"
@@ -273,6 +274,7 @@ unsigned char CreateSubMenuScrollButtons(void)
         g_submenu_scroll_buttons[i]->SetPosition(g_scroll_button_positions[i].x,
                                                  g_scroll_button_positions[i].y);
         g_submenu_scroll_buttons[i]->m_owner = 0;
+        g_submenu_scroll_buttons[i]->SetLayoutAnchor(W8_ANCHOR_LEFT); /* layout A */
     }
     return 1;
 }
@@ -313,6 +315,7 @@ unsigned char CreateSubMenuPanelButtons(void)
         g_submenu_panel_buttons[index]->SetPosition(g_submenu_panel_button_positions[index].x,
                                                     g_submenu_panel_button_positions[index].y);
         g_submenu_panel_buttons[index]->m_owner = 0;
+        g_submenu_panel_buttons[index]->SetLayoutAnchor(W8_ANCHOR_RIGHT); /* layout A */
     }
     return 1;
 }
@@ -338,6 +341,7 @@ unsigned char CreateOptionsDiskButton(void)
                                      BUTTON_NO_CALLBACK, BUTTON_NO_CALLBACK);
     g_options_disk_button->SetPosition(g_options_disk_position.x, g_options_disk_position.y);
     g_options_disk_button->m_owner = 0;
+    g_options_disk_button->SetLayoutAnchor(W8_ANCHOR_LEFT); /* layout A */
     return 1;
 }
 
@@ -348,7 +352,11 @@ void RedrawOptionsDiskButton(void)
 {
     bool enabled;
 
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 2, 0, 0x1c2, VO_BLT_SRCTRANSPARENCY, 0);
+    {
+        CanvasDrawScope left_scope(W8_ANCHOR_LEFT); /* layout A: bottom bar, left end */
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 2, 0, 0x1c2, VO_BLT_SRCTRANSPARENCY,
+                                      0);
+    }
     g_options_disk_button->m_dirty = true;
     if (!gXStatus.fNpcDialogueMode && !gXStatus.fLockInteractMode && !gXStatus.fTrapInteractMode &&
         !gXStatus.fCampMode && !gXStatus.fLockInteract && !gXStatus.fTrapInteract) {
@@ -403,8 +411,11 @@ void UpdateCombatStanceButtons(void)
 // FUNCTION: WIZ8 0x00597D30
 void RedrawCombatStanceButtons(void)
 {
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 3, 0x262, 0x1c2, VO_BLT_SRCTRANSPARENCY,
-                                  0);
+    {
+        CanvasDrawScope right_scope(W8_ANCHOR_RIGHT); /* layout A: bottom bar, right end */
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 3, 0x262, 0x1c2,
+                                      VO_BLT_SRCTRANSPARENCY, 0);
+    }
     for (int index = 0; index < 5; ++index) {
         g_combat_stance_buttons[index]->m_dirty = true;
     }
@@ -466,6 +477,7 @@ unsigned char CreateCombatStanceButtons(void)
         g_combat_stance_buttons[index]->SetPosition(g_combat_stance_positions[index].x,
                                                     g_combat_stance_positions[index].y);
         g_combat_stance_buttons[index]->m_owner = 0;
+        g_combat_stance_buttons[index]->SetLayoutAnchor(W8_ANCHOR_RIGHT); /* layout A */
     }
     return 1;
 }
@@ -519,6 +531,7 @@ unsigned char CreateRoofButtons(void)
         g_roof_buttons[index]->SetPosition(g_roof_button_positions[index].x,
                                            g_roof_button_positions[index].y);
         g_roof_buttons[index]->m_owner = 0;
+        g_roof_buttons[index]->SetLayoutAnchor(W8_ANCHOR_LEFT); /* layout A */
     }
     return 1;
 }
@@ -528,7 +541,10 @@ unsigned char CreateRoofButtons(void)
 // FUNCTION: WIZ8 0x00598060
 void RedrawRoofButtons(void)
 {
-    DrawCatalogImage(FRAME_BUFFER, 0x85, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
+    /* Wide canvas layout A: main_roof is 640 wide; stretched over the whole
+       canvas by repeating its middle 40 px (left end with the view buttons
+       at the left edge, right end with the spell-icon strip at the right). */
+    DrawCatalogImageWide(0x85, 0, 0, 0, 0, 0x280, 300, 340, false);
     for (int index = 0; index < 3; ++index) {
         g_roof_buttons[index]->m_dirty = true;
     }
@@ -693,7 +709,11 @@ void RedrawLayoutArrowButtons(void)
     bool enabled;
     W8DialogButton* draw_button;
 
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 0, 0, 0x166, VO_BLT_SRCTRANSPARENCY, 0);
+    {
+        CanvasDrawScope left_scope(W8_ANCHOR_LEFT); /* layout A: left panel strip */
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 0, 0, 0x166, VO_BLT_SRCTRANSPARENCY,
+                                      0);
+    }
     for (button = g_layout_arrow_buttons; button < &g_layout_arrow_buttons[6]; ++button) {
         (*button)->m_dirty = true;
     }
@@ -782,6 +802,7 @@ unsigned char CreateLayoutArrowButtons(void)
         g_layout_arrow_buttons[index]->SetPosition(g_layout_arrow_positions[index].x,
                                                    g_layout_arrow_positions[index].y);
         g_layout_arrow_buttons[index]->m_owner = 0;
+        g_layout_arrow_buttons[index]->SetLayoutAnchor(W8_ANCHOR_LEFT); /* layout A */
     }
     return 1;
 }
@@ -948,8 +969,9 @@ void DrawSubMenuCharacterAction(void)
     SetFont(g_smfnt_font);
     row = &g_status.buffers.XChar[slot];
     SetFontObjectPalette16BPP(g_smfnt_font, g_font_state_palettes[row->party_order_index]);
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 6, 0x157, 0x1c2, VO_BLT_SRCTRANSPARENCY,
-                                  0);
+    /* Wide canvas layout A: the caption plate (185 px) stretched by 2*ox; the
+       centered text below stays centered (game x is the canvas center). */
+    DrawCatalogImageWide(0x7e, 0, 6, 0x157, 0x1c2, 0xb9, 0x54, 0x64, true);
     character = &g_status.buffers.Char[slot];
     swprintf(text, L"%s - %s", character->name,
              gppStringList[g_profession_name_message_ids[character->iProfession]]);
@@ -1102,10 +1124,15 @@ void RedrawSubMenuButtons(void)
     int index;
     int frame;
 
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 4, 0x1e, 0x1c2, VO_BLT_SRCTRANSPARENCY, 0);
     frame = !gXStatus.fCombatMode ? 8 : 9;
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, frame, 0xc4, 0x1c2, VO_BLT_SRCTRANSPARENCY,
-                                  0);
+    {
+        /* Wide canvas layout A: action buttons + frame = bottom bar left part. */
+        CanvasDrawScope left_scope(W8_ANCHOR_LEFT);
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 4, 0x1e, 0x1c2,
+                                      VO_BLT_SRCTRANSPARENCY, 0);
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, frame, 0xc4, 0x1c2,
+                                      VO_BLT_SRCTRANSPARENCY, 0);
+    }
 
     for (button = g_submenu_buttons; button < &g_submenu_buttons[9]; ++button) {
         (*button)->m_dirty = true;
@@ -1115,17 +1142,22 @@ void RedrawSubMenuButtons(void)
         (*button)->Draw();
     }
 
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 7, 0x210, 0x1c2, VO_BLT_SRCTRANSPARENCY,
-                                  0);
+    {
+        CanvasDrawScope right_scope(W8_ANCHOR_RIGHT); /* layout A: right part */
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 7, 0x210, 0x1c2,
+                                      VO_BLT_SRCTRANSPARENCY, 0);
+    }
     for (button = g_submenu_panel_buttons; button < &g_submenu_panel_buttons[2]; ++button) {
         (*button)->m_dirty = true;
     }
     UpdateSubMenuPanelButtons();
 
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 5, 0x124, 0x1c2, VO_BLT_SRCTRANSPARENCY,
-                                  0);
-    DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 6, 0x157, 0x1c2, VO_BLT_SRCTRANSPARENCY,
-                                  0);
+    {
+        CanvasDrawScope left_scope(W8_ANCHOR_LEFT); /* layout A: scroll-arrow plate */
+        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x7e, 0, 5, 0x124, 0x1c2,
+                                      VO_BLT_SRCTRANSPARENCY, 0);
+    }
+    DrawCatalogImageWide(0x7e, 0, 6, 0x157, 0x1c2, 0xb9, 0x54, 0x64, true); /* caption, wide */
     if (g_status.buffers.XChar[g_status.selected_character].fOccupied) {
         DrawSubMenuCharacterAction();
     }
@@ -1276,8 +1308,10 @@ void UpdateSubMenuAutoClose(void)
     case 5:
         right = left + 0x67;
     }
-    if (!IsCursorInRectangle(left, gpSubMenuPanel->m_bounds.top, right,
-                             gpSubMenuPanel->m_bounds.top + 0x1c)) {
+    /* Wide canvas layout A: the popup sits over its (anchored) button. */
+    if (!IsCursorInAnchoredRectangle(gpSubMenuPanel->m_layoutAnchor, left,
+                                     gpSubMenuPanel->m_bounds.top, right,
+                                     gpSubMenuPanel->m_bounds.top + 0x1c)) {
     check_clock:
         if (!g_submenu_close_pending) {
             g_submenu_clock = SetCountdownClock(500);
@@ -1440,7 +1474,10 @@ unsigned char BuildSubMenuPanel(short notification)
         SetRegionHelp(index + 0xc2, true, g_submenu_entry_help_ids[menu * 5 + entry]);
     }
     g_submenu_rows[built - 1] =
-        new W8TextControl(gpSubMenuPanel, built + 0xc1, built * 19 - 14, 5, built * 19 - 2, 0x17,
+        /* Retail 0x595c1d/0x595c26: right = left + 0x12 (built*19 + 4). The
+           port had built*19 - 2: the close icon got a 12 px box and was drawn
+           6 px to the left, over the previous entry. */
+        new W8TextControl(gpSubMenuPanel, built + 0xc1, built * 19 - 14, 5, built * 19 + 4, 0x17,
                           0x89, 0, 0xbd, 0xbd, 0xbf, 0xbf, -1);
     if (g_submenu_rows[built - 1] == 0) {
         DestroySubMenuPanel();
@@ -1449,6 +1486,13 @@ unsigned char BuildSubMenuPanel(short notification)
     g_submenu_rows[built - 1]->m_primaryActivationCallback = DestroySubMenuControls;
     g_submenu_rows[built - 1]->m_secondaryActivationCallback = DestroySubMenuControls;
     SetRegionHelp(built + 0xc1, true, 0x11);
+    /* Wide canvas layout A: the popup opens above its button - the move menu
+       (9) over the right-hand panel button, the others over the left bank. */
+    {
+        int anchor = notification == 9 ? W8_ANCHOR_RIGHT : W8_ANCHOR_LEFT;
+        gpSubMenuPanel->SetLayoutAnchor(anchor);
+        SetRegionLayoutAnchor(0xc7, anchor);
+    }
     RegionSetEnable(0x27);
     gpSubMenuPanel->SetEnabled(true);
     g_level_block->combat_end_notification = notification;

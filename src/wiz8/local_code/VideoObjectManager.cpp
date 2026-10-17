@@ -3,6 +3,8 @@
 #include "wiz8/sr_api.h"
 #include "wiz8/video_object_catalog.h"
 #include "wiz8/utility.h"
+#include "wiz8/canvas.h"
+#include "wiz8/wide_art.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -684,8 +686,11 @@ W8VideoFrame g_video_frames[1658] = {
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
+/* Retail spans 0x006448c8..0x00647768 (next global 0x00647770): 494 static
+   slots followed by zeroed room for the item-image cache, which assigns
+   slot 0x1ec + n for n < 1000 (GetOrCreateVideoObject, 0x0055ce80). */
 // GLOBAL: WIZ8 0x006448c8
-W8VideoObjectSlot g_video_slots[494] = {
+W8VideoObjectSlot g_video_slots[W8_VIDEO_SLOT_COUNT] = {
     {0, 0},    {0, 1},    {0, 2},    {0, 7},    {0, 12},   {0, 13},   {0, 14},   {0, 18},
     {0, 22},   {0, 23},   {0, 24},   {0, 29},   {0, 30},   {0, 31},   {0, 35},   {0, 36},
     {0, 37},   {1, 0},    {81, 0},   {161, 0},  {241, 0},  {242, 0},  {243, 0},  {244, 0},
@@ -757,6 +762,32 @@ W8VideoObjectSlot g_video_slots[494] = {
 
 #define VIDEO_OBJECT_MANAGER_CPP "C:\\Projects\\Wizardry 8\\Local Code\\VideoObjectManager.cpp"
 
+/* Mod (wide canvas, wide_art.h): a full-screen 16-bit 640x480 background
+   drawn at point (0,0) of the whole window (loading screens, party death,
+   endings, main menu...) is replaced by a wide pair "<name>_<W>.sti" covering the whole
+   canvas, if one exists. false - draw as in the original (including always
+   at W = 640). */
+static bool DrawCatalogSurfaceWide(UINT32 target, unsigned int surface, int left, int top,
+                                   UINT32 mode, const char* path)
+{
+    if (g_canvas_ox <= 0 || target != FRAME_BUFFER || left != 0 || top != 0 ||
+        CanvasDrawOrigin() != g_canvas_ox) {
+        return false;
+    }
+    /* Only "the whole image as is": no regions, sub-rectangles,
+       fills or mirroring. */
+    if ((mode & (VS_BLT_SRCREGION | VS_BLT_SRCSUBRECT | VS_BLT_DESTREGION | VS_BLT_COLORFILL |
+                 VS_BLT_COLORFILLRECT | VS_BLT_MIRROR_Y)) != 0) {
+        return false;
+    }
+    HVSURFACE source;
+    if (!GetVideoSurface(&source, surface) || source->usWidth != W8_GAME_W ||
+        source->usHeight != W8_GAME_H || source->ubBitDepth != 16) {
+        return false;
+    }
+    return DrawWideFullscreenArt(path);
+}
+
 // FUNCTION: WIZ8 0x00549250
 void ReleaseLoadedVideoFrames(void)
 {
@@ -802,6 +833,9 @@ void DrawCatalogImage(UINT32 target, int object, int frame, short image, int lef
     }
     if (g_video_frames[slot->first_frame + frame].storage_kind == W8_VIDEO_STORAGE_OBJECT) {
         ok = BltVideoObjectFromIndex(target, surface, row, left, top, mode, effects);
+    } else if (DrawCatalogSurfaceWide(target, surface, left, top, mode,
+                                      g_video_frames[slot->first_frame + frame].path)) {
+        ok = TRUE; /* mod: wide pair drawn over the whole canvas */
     } else {
         ok = BltVideoSurface(target, surface, row, left, top, mode, 0);
     }

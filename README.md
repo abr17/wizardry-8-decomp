@@ -1,3 +1,19 @@
+> **This is a fork: the `widescreen` branch adds the Wizardry 8 widescreen patch.**
+>
+> On top of upstream commit `075cbd0` it adds a wide 2D canvas (16:9, 16:10, 3:2), a wide main
+> HUD and full-width screens, wide loading screens, borderless / window / fullscreen modes with
+> in-game display settings, Russian-translation text support, and a build with modern MSVC 2022.
+> It is the source of `wiz8hy.dll` in [abr17/wiz8-widescreen](https://github.com/abr17/wiz8-widescreen)
+> (tag `wiz8-widescreen-1.0.0` = the 1.0.0 release); build instructions and design notes are there.
+> Comments that mention "wiz8-widescreen docs/..." or "scripts/..." refer to that repository.
+>
+> **Licensing:** upstream has no licence file. The Standard Gaming Platform code under `src/sgp` is
+> distributed under Strategy First's non-commercial SFI Source Code License Agreement, and reconstructed
+> code derived from it is not offered under broader terms. The widescreen changes in this branch follow
+> the same terms as the code they modify (they are **not** MIT, unlike abr17/wiz8-widescreen).
+> No Wizardry 8 game files are included; a legally obtained copy of the game is required.
+> Upstream's own README follows unchanged.
+
 # Wizardry 8 decompilation
 
 A matching decompilation of the original Windows release of *Wizardry 8* (2001).

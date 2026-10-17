@@ -46,7 +46,14 @@ target_compile_options(WIZ8_SGP PRIVATE
     /nologo /Z7 /O2 /Ob2
     "/FI${PROJECT_SOURCE_DIR}/include/wiz8/compat/compiler.h"
 )
-if(NOT WIZ8_ANALYSIS_BUILD)
+if(WIZ8_MODERN_MSVC)
+    # msvc2022 port: /G5 no longer exists; same VC6 language model and static
+    # CRT as the game objects (cmake/ModernMsvc.cmake).
+    target_compile_options(WIZ8_SGP PRIVATE /MT ${WIZ8_MODERN_MSVC_FLAGS})
+    target_compile_definitions(WIZ8_SGP PRIVATE ${WIZ8_MODERN_MSVC_DEFINES})
+    target_include_directories(WIZ8_SGP PRIVATE
+        "${PROJECT_SOURCE_DIR}/include/wiz8/compat/modern_msvc")
+elseif(NOT WIZ8_ANALYSIS_BUILD)
     target_compile_options(WIZ8_SGP PRIVATE /G5 /MD)
 endif()
 target_include_directories(WIZ8_SGP PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")

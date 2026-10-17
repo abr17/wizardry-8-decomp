@@ -611,7 +611,8 @@ void HandleFactChange(W8FactId fact_id, unsigned char value)
         if (value == 0) {
             return;
         }
-        position.Set(53550.0f, 3516.0f, 36936.0f);
+        /* Retail 0x0050760A: look-at = 0x47512E00/0x455AC000/0x47108800 = (53550, 3500, 37000). */
+        position.Set(53550.0f, 3500.0f, 37000.0f);
         CameraLookAt(&position);
         fact_value = GetFact(W8_FACT_TMISSION_KILL_UMPANI_CORD_SEVERED);
         if (fact_value == 0) {

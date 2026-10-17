@@ -259,17 +259,21 @@ W8NpcState* GetNpcStateByKind(int kind)
 // FUNCTION: WIZ8 0x0050B8F0
 bool NpcLeadHasNameStyle(W8NpcId kind)
 {
+    /* Retail 0x0050b94a/0x0050b992 compare the condition unsigned (cmp 0xf / jae), so
+       a condition >= 0x80000000 does not count (found by the w8diff harness). */
     if (g_status.buffers.XChar[0].fOccupied) {
         W8NpcState* npc = GetNpcState(g_status.buffers.XChar[0].npc_index);
         if (npc->name_style == kind &&
-            g_status.buffers.Char[0].highest_condition < W8_CONDITION_ASLEEP) {
+            static_cast<unsigned int>(g_status.buffers.Char[0].highest_condition) <
+                static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
             return true;
         }
     }
     if (g_status.buffers.XChar[1].fOccupied) {
         W8NpcState* npc = GetNpcState(g_status.buffers.XChar[1].npc_index);
         if (npc->name_style == kind &&
-            g_status.buffers.Char[1].highest_condition < W8_CONDITION_ASLEEP) {
+            static_cast<unsigned int>(g_status.buffers.Char[1].highest_condition) <
+                static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
             return true;
         }
     }
@@ -542,8 +546,11 @@ void UpdateNpcPartyMember(int party_slot)
         ShowNoticef(W8_FONT_PALETTE_RED, gppStringList[0x7d5]);
         return;
     }
+    /* Retail 0x0050b51f/0x0050b4dc compare the condition unsigned (cmp 0xf / jae), as
+       the other bound-NPC passes (found by the w8diff harness in those passes). */
     if (NpcOffersService(npc, GetLevelBand(g_status.current_level))) {
-        if (character->highest_condition > W8_CONDITION_WEBBED) {
+        if (static_cast<unsigned int>(character->highest_condition) >
+            static_cast<unsigned int>(W8_CONDITION_WEBBED)) {
             npc->event_pending = 1;
             BeginScriptedWorldAction();
             QueueNpcMessageLine(W8_NPC_MSG_GROUP_ACTION, party_slot);
@@ -553,7 +560,8 @@ void UpdateNpcPartyMember(int party_slot)
                             g_character_event_full_volume);
         return;
     }
-    if (character->highest_condition < W8_CONDITION_ASLEEP) {
+    if (static_cast<unsigned int>(character->highest_condition) <
+        static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
         QueueCharacterEvent(character, g_effect33, 0, g_character_event_no_flags,
                             g_character_event_full_volume);
     }
@@ -774,9 +782,12 @@ bool CanNpcJoinParty(W8NpcState* npc)
         count = 0;
         average = 0;
         for (index = 0; index < 8; ++index) {
+            /* Retail 0x0050c997 compares the condition unsigned (cmp 0xf / jae), so a
+               condition >= 0x80000000 is not counted (found by the w8diff harness). */
             if (g_status.buffers.XChar[index].fOccupied &&
                 g_status.buffers.Char[index].hp_current > 0 &&
-                g_status.buffers.Char[index].highest_condition < W8_CONDITION_ASLEEP) {
+                static_cast<unsigned int>(g_status.buffers.Char[index].highest_condition) <
+                    static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
                 ++count;
                 total += g_status.buffers.Char[index].uiExpLevel;
             }
@@ -960,20 +971,26 @@ void ProcessNpcPendingEvents(void)
                         continue;
                     }
                     W8NpcState* npc = GetNpcState(row->npc_index);
-                    if (character->highest_condition < W8_CONDITION_ASLEEP) {
+                    /* Retail 0x0050cc96 and 0x0050cce1/0x0050cd15 compare the conditions
+                       unsigned (jae / jb), so a condition >= 0x80000000 is neither clear
+                       nor incapacitated (found by the w8diff harness). */
+                    if (static_cast<unsigned int>(character->highest_condition) <
+                        static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
                         int event = 0;
                         if (GetLevelBand(g_status.current_level) != 0xd) {
                             if (npc->name_style == W8_NPC_RODAN &&
                                 (!g_status.buffers.XChar[0].fOccupied ||
                                  GetNpcState(g_status.buffers.XChar[0].npc_index)->name_style !=
                                      W8_NPC_DRAZIC ||
-                                 g_status.buffers.Char[0].highest_condition >=
-                                     W8_CONDITION_ASLEEP) &&
+                                 static_cast<unsigned int>(
+                                     g_status.buffers.Char[0].highest_condition) >=
+                                     static_cast<unsigned int>(W8_CONDITION_ASLEEP)) &&
                                 (!g_status.buffers.XChar[1].fOccupied ||
                                  GetNpcState(g_status.buffers.XChar[1].npc_index)->name_style !=
                                      W8_NPC_DRAZIC ||
-                                 g_status.buffers.Char[1].highest_condition >=
-                                     W8_CONDITION_ASLEEP)) {
+                                 static_cast<unsigned int>(
+                                     g_status.buffers.Char[1].highest_condition) >=
+                                     static_cast<unsigned int>(W8_CONDITION_ASLEEP))) {
                                 event = 0x6c;
                             } else if (npc->name_style == W8_NPC_DRAZIC &&
                                        !NpcLeadHasNameStyle(W8_NPC_RODAN)) {
@@ -1811,8 +1828,11 @@ void ApplyNpcInteraction(W8NpcState* npc, int kind, int value, W8ItemInstance* i
         }
         for (index = 0; index < 8; ++index) {
             W8Character* character = &g_status.buffers.Char[index];
+            /* Retail 0x0050a6df compares the condition unsigned (cmp 0xf / jae), so a
+               condition >= 0x80000000 is not averaged (found by the w8diff harness). */
             if (g_status.buffers.XChar[index].fOccupied && character->hp_current != 0 &&
-                character->highest_condition < W8_CONDITION_ASLEEP) {
+                static_cast<unsigned int>(character->highest_condition) <
+                    static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
                 ++count;
                 total_level += character->uiExpLevel;
             }
@@ -1823,11 +1843,14 @@ void ApplyNpcInteraction(W8NpcState* npc, int kind, int value, W8ItemInstance* i
             average_level = total_level / count;
         }
         scale = npc->record->charm_scale;
+        /* Retail 0x0050A716/0x0050A72E: the best-skill slot goes into the dead
+           'kind' argument slot; 0x0050A7A1 then practices the caller's speaker
+           (value), not the best communicator. */
         if (scale < 1) {
-            level = static_cast<int>(GetBestPartySkillLevel(W8_SKILL_COMMUNICATION, &value));
+            level = static_cast<int>(GetBestPartySkillLevel(W8_SKILL_COMMUNICATION, &kind));
             quotient = -scale / 5;
         } else {
-            level = static_cast<int>(GetBestPartySkillLevel(W8_SKILL_COMMUNICATION, &value));
+            level = static_cast<int>(GetBestPartySkillLevel(W8_SKILL_COMMUNICATION, &kind));
             quotient = scale / 5;
         }
         delta = scale + level * quotient / 100;
@@ -1998,7 +2021,9 @@ W8NpcPickpocketResult AttemptNpcPickpocket(W8Character* character, W8NpcState* n
 char AttemptNpcItemTheft(W8Character* character, W8NpcState* npc, int item_id, int count)
 {
     SeedNpcTheftRoll(character, npc);
-    char score = ScoreNpcTheft(character, npc, item_id, count);
+    /* Retail 0x0050c0c9 passes only the low byte of the count (and eax,0xff) (found
+       by the w8diff harness). */
+    char score = ScoreNpcTheft(character, npc, item_id, count & 0xff);
     if (static_cast<signed char>(npc->suspicion) < 'd') {
         ++npc->suspicion;
     }
@@ -2301,8 +2326,10 @@ void ClearPendingNpcLevelFlags(void)
          npc_index < static_cast<unsigned int>(g_npc_states->GetCount()); ++npc_index) {
         W8NpcState* npc = *g_npc_states->GetAt(npc_index);
 
+        /* Retail 0x0050c2a1 sign-extends the stamped level (movsx) before comparing
+           it with current_level (found by the w8diff harness). */
         if (npc->pending_restore && npc->binding_unavailable == 0 &&
-            npc->pending_restore_level == g_status.current_level) {
+            static_cast<signed char>(npc->pending_restore_level) == g_status.current_level) {
             if (RestoreNpcMonster(npc, npc->restore_entity_name)) {
                 npc->pending_restore = false;
             }
@@ -2338,8 +2365,10 @@ void ReleaseNpcMonsterBindings(void)
          npc_index < static_cast<unsigned int>(g_npc_states->GetCount()); ++npc_index) {
         W8NpcState* npc = *g_npc_states->GetAt(npc_index);
 
+        /* Retail 0x0050c325 sign-extends the stamped level (movsx) before comparing
+           it with current_level (found by the w8diff harness). */
         if (npc->pending_release && npc->binding_unavailable == 0 &&
-            npc->pending_release_level == g_status.current_level) {
+            static_cast<signed char>(npc->pending_release_level) == g_status.current_level) {
             W8NpcState* companion = GetNpcStateByKind(npc->name_style);
             ReleaseNpcCompanionMonster(companion);
         }
@@ -2434,7 +2463,10 @@ void HandleMarkedNpcEvent(W8NpcState* npc, char mode)
 {
     W8MonsterInfo* monster_info = GetNpcMonsterInfo(npc);
 
-    if (monster_info != 0 && monster_info->highest_condition > W8_CONDITION_WEBBED) {
+    /* Retail 0x0050cfb3 compares the condition unsigned (cmp 0xf / jae), so a
+       condition >= 0x80000000 also stops the event (found by the w8diff harness). */
+    if (monster_info != 0 && static_cast<unsigned int>(monster_info->highest_condition) >
+                                 static_cast<unsigned int>(W8_CONDITION_WEBBED)) {
         return;
     }
     if (npc->name_style == ' ' || npc->name_style == '!') {
@@ -2626,17 +2658,21 @@ bool ClearNpcScheduledItem(W8NpcState* npc, int item_id, W8ItemInstance* out)
 
 static bool HasHealthyNpcPartner(unsigned char kind)
 {
+    /* Retail 0x0050e0c5/0x0050e0f5 (and the 0x0050e230 copies) compare the condition
+       unsigned (cmp 0xf / jb) (found by the w8diff harness). */
     if (g_status.buffers.XChar[0].fOccupied) {
         W8NpcState* lead = GetNpcState(g_status.buffers.XChar[0].npc_index);
         if (lead->name_style == kind &&
-            g_status.buffers.Char[0].highest_condition < W8_CONDITION_ASLEEP) {
+            static_cast<unsigned int>(g_status.buffers.Char[0].highest_condition) <
+                static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
             return true;
         }
     }
     if (g_status.buffers.XChar[1].fOccupied) {
         W8NpcState* lead = GetNpcState(g_status.buffers.XChar[1].npc_index);
         if (lead->name_style == kind &&
-            g_status.buffers.Char[1].highest_condition < W8_CONDITION_ASLEEP) {
+            static_cast<unsigned int>(g_status.buffers.Char[1].highest_condition) <
+                static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
             return true;
         }
     }
@@ -2661,7 +2697,10 @@ bool QueueNpcDepartureEvents(int destination_level)
             continue;
         }
         W8NpcState* npc = GetNpcState(row->npc_index);
-        if (character->highest_condition >= W8_CONDITION_ASLEEP) {
+        /* Retail 0x0050df38 compares the condition unsigned (cmp 0xf / jae) (found by
+           the w8diff harness). */
+        if (static_cast<unsigned int>(character->highest_condition) >=
+            static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
             continue;
         }
         int service = 0;
@@ -2752,7 +2791,10 @@ void QueueNpcTravelRefusals(int destination_level)
             continue;
         }
         W8NpcState* npc = GetNpcState(row->npc_index);
-        if (character->highest_condition >= W8_CONDITION_ASLEEP) {
+        /* Retail 0x0050e2ac compares the condition unsigned (cmp 0xf / jae), as the
+           departure pass above (found by the w8diff harness). */
+        if (static_cast<unsigned int>(character->highest_condition) >=
+            static_cast<unsigned int>(W8_CONDITION_ASLEEP)) {
             continue;
         }
         if (NpcOffersService(npc, GetLevelBand(destination_level))) {

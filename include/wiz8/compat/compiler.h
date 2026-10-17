@@ -13,8 +13,23 @@ typedef unsigned long w8_ulong_ptr;
 
 // Keep modern structural annotations visible to the lint compiler while
 // making them syntax-neutral for the C++98 matching toolchain.
-#if !defined(WIZ8_CLANG_LINT)
+/* msvc2022 port: MSVC 2015+ understands override, so keep it real there. */
+#if !defined(WIZ8_CLANG_LINT) && !(defined(_MSC_VER) && _MSC_VER >= 1900)
 #define override
+#endif
+
+/* msvc2022 port: some recovered functions read a local that is unset on one
+   path, exactly like retail. Under VC6 that read sees whatever VC6's frame
+   layout left in the slot, which matches retail; a modern compiler lays the
+   frame out differently and would read something else. W8_RETAIL_STALE(v)
+   expands to "= v" (the value retail's slot actually held, taken from retail
+   disassembly; see wiz8-widescreen docs/decomp-port.md) only on MSVC 2015+, and to
+   nothing for VC6 and the clang lint lane, so their output and diagnostics
+   stay unchanged. Usage: unsigned char accepted W8_RETAIL_STALE(1); */
+#if defined(_MSC_VER) && _MSC_VER >= 1900 && !defined(__clang__)
+#define W8_RETAIL_STALE(value) = (value)
+#else
+#define W8_RETAIL_STALE(value)
 #endif
 
 /* Keep source-level layout contracts in standard static_assert form while
@@ -22,7 +37,8 @@ typedef unsigned long w8_ulong_ptr;
    assertion independent even when several appear in one scope.  C TUs keep the
    shim under lint too: C11 static_assert needs <assert.h>, which the pinned
    VC98 headers do not provide. */
-#if !defined(WIZ8_CLANG_LINT) || !defined(__cplusplus)
+/* msvc2022 port: MSVC 2015+ has a real C++ static_assert; keep the shim for C TUs. */
+#if (!defined(WIZ8_CLANG_LINT) && !(defined(_MSC_VER) && _MSC_VER >= 1900)) || !defined(__cplusplus)
 #define WIZ8_COMPAT_JOIN_INNER(left, right) left##right
 #define WIZ8_COMPAT_JOIN(left, right) WIZ8_COMPAT_JOIN_INNER(left, right)
 #define static_assert(condition, message)                                                          \

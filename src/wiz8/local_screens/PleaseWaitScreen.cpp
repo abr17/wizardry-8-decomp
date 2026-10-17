@@ -25,6 +25,9 @@
 #include "wiz8/sr_api.h"
 #include "wiz8/video_object_catalog.h"
 #include "wiz8/utility.h"
+#include "wiz8/canvas.h"
+#include "wiz8/wide_art.h"
+#include "wiz8/local_screens/MainGameLayout.h"
 
 #include "Font.h"
 #include "FileMan.h"
@@ -136,7 +139,8 @@ unsigned char PleaseWaitScreenEnter(void)
     }
     MSYS_Init();
     ResetRegions();
-    SetClippingRegionAndImageWidth(0x500, 0, 0, 0x280, 0x1e0);
+    /* wide canvas: real pitch */
+    SetClippingRegionAndImageWidth(CanvasFrameBufferPitch(), 0, 0, 0x280, 0x1e0);
     SetFontDestBuffer(FRAME_BUFFER, 0, 0, 0x280, 0x1e0, 0);
     SetPrimarySurfaceTextureHint2Enabled(false);
     DisableCursorScene();
@@ -178,6 +182,32 @@ static bool PleaseWaitScreenEnsureLevelArchive(int level)
     return true;
 }
 
+/* Mod (wide canvas): if the level background is drawn by a wide pair (over the whole
+   canvas), the gears (0x1dd, 91x91 at the left window edge) move to the left canvas
+   edge together with the caption, and the strip under the caption (0x1de, 640x34, transparent
+   on the left under the gears) continues to the right edge by repeating its
+   smooth piece [300, 400). Without a wide background - as in the original. */
+static bool PleaseWaitBarIsWide(void)
+{
+    return g_canvas_ox > 0 && WideFullscreenArtOnCanvas();
+}
+
+static void DrawPleaseWaitBarWide(void)
+{
+    enum { SLICE_LEFT = 300, SLICE_RIGHT = 400 };
+    /* The whole strip from the left canvas edge (window origin 0)... */
+    DrawCatalogImagePiece(0x1de, 0, 0, 0, 0x1be, 0, 0, 0x280);
+    /* ...and its continuation to the right edge: canvas 640 .. W. */
+    for (int start = 0x280; start < g_canvas_w; start += SLICE_RIGHT - SLICE_LEFT) {
+        int width = g_canvas_w - start;
+        if (width > SLICE_RIGHT - SLICE_LEFT) {
+            width = SLICE_RIGHT - SLICE_LEFT;
+        }
+        DrawCatalogImagePiece(0x1de, 0, 0, 0, 0x1be, start - SLICE_LEFT, SLICE_LEFT,
+                              SLICE_LEFT + width);
+    }
+}
+
 /* Draw the loading screen's backdrop, progress frame and caption. Retail
    expands this helper at both frame-handler call sites. */
 static void DrawPleaseWaitScreen()
@@ -186,11 +216,20 @@ static void DrawPleaseWaitScreen()
                        ? g_level_backdrops[g_load_descriptor->parameter]
                        : 0xe4;
     DrawCatalogImage(FRAME_BUFFER, backdrop, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
-    DrawCatalogImage(FRAME_BUFFER, 0x1de, 0, 0, 0, 0x1be, VO_BLT_SRCTRANSPARENCY, 0);
-    SetFont(g_level_load_font);
-    gprintf(0x6a, 0x1c7, Wiz8ToSgpWideText(g_format_s), g_load_descriptor->caption);
-    DrawCatalogImage(FRAME_BUFFER, 0x1dd, 0, g_load_descriptor->caption_y, 0, 0x185,
-                     VO_BLT_SRCTRANSPARENCY, 0);
+    if (PleaseWaitBarIsWide()) {
+        DrawPleaseWaitBarWide();
+        CanvasOriginScope scope(0); /* caption and gears - from the left canvas edge */
+        SetFont(g_level_load_font);
+        gprintf(0x6a, 0x1c7, Wiz8ToSgpWideText(g_format_s), g_load_descriptor->caption);
+        DrawCatalogImage(FRAME_BUFFER, 0x1dd, 0, g_load_descriptor->caption_y, 0, 0x185,
+                         VO_BLT_SRCTRANSPARENCY, 0);
+    } else {
+        DrawCatalogImage(FRAME_BUFFER, 0x1de, 0, 0, 0, 0x1be, VO_BLT_SRCTRANSPARENCY, 0);
+        SetFont(g_level_load_font);
+        gprintf(0x6a, 0x1c7, Wiz8ToSgpWideText(g_format_s), g_load_descriptor->caption);
+        DrawCatalogImage(FRAME_BUFFER, 0x1dd, 0, g_load_descriptor->caption_y, 0, 0x185,
+                         VO_BLT_SRCTRANSPARENCY, 0);
+    }
     ResetTransientRenderScenes();
 }
 
@@ -356,6 +395,8 @@ void UpdatePleaseWaitLoadFrame(void)
     if (tick - g_load_descriptor->entered_tick > 499) {
         g_load_descriptor->caption_y = (g_load_descriptor->caption_y + 1) % 0x18;
         g_load_descriptor->entered_tick = tick;
+        /* Mod: with the wide strip the gears are at the left canvas edge. */
+        CanvasOriginScope scope(PleaseWaitBarIsWide() ? 0 : CanvasDrawOrigin());
         DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x1dd, 0, g_load_descriptor->caption_y, 0,
                                       0x185, VO_BLT_SRCTRANSPARENCY, 0);
         RenderFrame();

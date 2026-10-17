@@ -65,6 +65,25 @@
 
 #define GAMEPLAYTIME_CPP "C:\\Projects\\Wizardry 8\\Local Code\\GameplayTime.cpp"
 
+/* Retail __ftol (0x005E1C22): fistp into a qword under truncation and keep the
+   low dword, so a value past the int range wraps instead of saturating to
+   0x80000000 the way a plain int cast does (found by the w8diff harness). */
+static int RetailFtol(double value)
+{
+    return static_cast<int>(static_cast<long long>(value));
+}
+
+/* What a regen tick leaves in a fractional accumulator after the whole points
+   are handed out. Retail (0x00503728..0x00503748 and its copies) reloads the
+   stored float, __ftols it, widens the low dword to a qword with a zero high
+   half (so it counts as unsigned) and subtracts on the x87 stack before the one
+   float store (found by the w8diff harness). */
+static float RegenAccumulatorRemainder(float accumulator)
+{
+    return static_cast<float>(
+        accumulator - static_cast<double>(static_cast<unsigned int>(RetailFtol(accumulator))));
+}
+
 static void BeginPartyCamping()
 {
     if (gXStatus.world_update_blocked) {
@@ -377,8 +396,11 @@ void ResolveSurpriseWake(void)
     if (g_combat_state != 0 && g_combat_state->party_surprised) {
         for (unsigned int slot = 0; slot < 8; ++slot) {
             W8Character* character = &g_status.buffers.Char[slot];
+            /* Retail 0x00502a19 compares the condition unsigned (cmp 0x12 / jae), so a
+               condition >= 0x80000000 is skipped (found by the w8diff harness). */
             if (!g_status.buffers.XChar[slot].fOccupied ||
-                character->highest_condition >= W8_CONDITION_DEAD) {
+                static_cast<unsigned int>(character->highest_condition) >=
+                    static_cast<unsigned int>(W8_CONDITION_DEAD)) {
                 continue;
             }
             int roll =
@@ -415,19 +437,26 @@ void ResolveSurpriseWake(void)
 // FUNCTION: WIZ8 0x00502b50
 void RebuildCharacterRegenRates(W8Character* character)
 {
+    double sum;
     float rate;
     int realm;
 
-    rate = (static_cast<unsigned int>(character->uiHPMax) * 0.4f + 20.0f) * 0.0041666669f;
-    character->health_regen_rate = rate;
+    /* Found by the w8diff harness: retail 0x00502b6e..0x00502b94 builds the rate on the
+       x87 stack, stores its float copy and multiplies the unrounded value by 1.5 for
+       the boost; the double keeps that one rounding per store. */
+    sum = (static_cast<double>(static_cast<unsigned int>(character->uiHPMax)) * 0.4f + 20.0f) *
+          0.0041666669f;
+    character->health_regen_rate = static_cast<float>(sum);
     if (character->bonus.boost_health_regen != 0) {
-        character->health_regen_rate = rate * 1.5f;
+        character->health_regen_rate = static_cast<float>(sum * 1.5f);
     }
 
-    rate = (static_cast<unsigned int>(character->uiStaminaMax) * 0.9f + 20.0f) * 0.0041666669f;
-    character->stamina_regen_rate = rate;
+    sum = (static_cast<double>(static_cast<unsigned int>(character->uiStaminaMax)) * 0.9f +
+           20.0f) *
+          0.0041666669f;
+    character->stamina_regen_rate = static_cast<float>(sum);
     if (character->bonus.boost_stamina_regen != 0) {
-        character->stamina_regen_rate = rate * 1.5f;
+        character->stamina_regen_rate = static_cast<float>(sum * 1.5f);
     }
 
     for (realm = 0; realm < W8_SPELL_REALM_COUNT; ++realm) {
@@ -435,8 +464,11 @@ void RebuildCharacterRegenRates(W8Character* character)
             character->spell_regen_rates[realm * 2] = 0.0f;
             continue;
         }
-        rate =
-            (static_cast<unsigned int>(character->sp_max[realm]) * 0.65f + 20.0f) * 0.0041666669f;
+        /* Retail 0x00502c15 keeps a float copy of the realm rate and boosts that copy. */
+        rate = static_cast<float>(
+            (static_cast<double>(static_cast<unsigned int>(character->sp_max[realm])) * 0.65f +
+             20.0f) *
+            0.0041666669f);
         character->spell_regen_rates[realm * 2] = rate;
         if (character->bonus.boost_spell_regen != 0) {
             character->spell_regen_rates[realm * 2] = rate * 1.5f;
@@ -450,24 +482,29 @@ void RebuildCharacterRegenRates(W8Character* character)
 // FUNCTION: WIZ8 0x00502c50
 void RebuildMonsterRegenRates(W8MonsterInfo* monster_info)
 {
-    float rate;
+    double rate;
 
-    rate = (static_cast<unsigned int>(monster_info->uiHPMax) * g_navigator_mode3_scale +
+    /* Found by the w8diff harness: retail 0x00502c77..0x00502c9c (fild, fmul, fadd, fmul,
+       fiadd, fst) stores the float copy and multiplies the unrounded x87 value by 1.5
+       for the boost, so the rate stays in double until each store. */
+    rate = (static_cast<double>(static_cast<unsigned int>(monster_info->uiHPMax)) *
+                g_navigator_mode3_scale +
             g_monster_record_float_scale) *
                0.0041666669f +
            monster_info->modifiers.health_regen_adjustment;
-    monster_info->hp_regen_rate = rate;
+    monster_info->hp_regen_rate = static_cast<float>(rate);
     if (monster_info->modifiers.boost_health_regen != 0) {
-        monster_info->hp_regen_rate = rate * g_float_one_and_a_half;
+        monster_info->hp_regen_rate = static_cast<float>(rate * g_float_one_and_a_half);
     }
 
-    rate = ((static_cast<unsigned int>(monster_info->stamina_max)) * g_float_nine_tenths +
+    rate = (static_cast<double>(static_cast<unsigned int>(monster_info->stamina_max)) *
+                g_float_nine_tenths +
             g_monster_record_float_scale) *
                0.0041666669f +
            monster_info->modifiers.stamina_regen_adjustment;
-    monster_info->stamina_regen_rate = rate;
+    monster_info->stamina_regen_rate = static_cast<float>(rate);
     if (monster_info->modifiers.boost_stamina_regen != 0) {
-        monster_info->stamina_regen_rate = rate * g_float_one_and_a_half;
+        monster_info->stamina_regen_rate = static_cast<float>(rate * g_float_one_and_a_half);
     }
 }
 
@@ -513,8 +550,12 @@ void AdvanceTimedEffects(unsigned int minutes)
 
     for (unsigned int slot = 0; slot < 8; ++slot) {
         W8Character* character = &g_status.buffers.Char[slot];
+        /* Retail 0x00502dbe and 0x00502e6e (monsters below) compare the condition
+           unsigned (jb / jae), like the other aging passes (found while triaging the
+           w8diff harness; this function itself is not run by the harness). */
         if (g_status.buffers.XChar[slot].fOccupied &&
-            (character->highest_condition < W8_CONDITION_DEAD ||
+            (static_cast<unsigned int>(character->highest_condition) <
+                 static_cast<unsigned int>(W8_CONDITION_DEAD) ||
              (character->uiCondition[W8_CONDITION_DEAD] == 0 &&
               GetConditionRecordFlag(slot, W8_DEPENDENCE_SWALLOWED)))) {
             GameTurnsPassedChar(slot, minutes);
@@ -531,7 +572,8 @@ void AdvanceTimedEffects(unsigned int minutes)
 
     for (unsigned int index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
         W8MonsterInfo* monster_info = MonsterGetScriptPartByLocationIndex(index);
-        if (monster_info->highest_condition < W8_CONDITION_DEAD) {
+        if (static_cast<unsigned int>(monster_info->highest_condition) <
+            static_cast<unsigned int>(W8_CONDITION_DEAD)) {
             AgeMonsterSight(monster_info, minutes, 0);
         }
     }
@@ -817,36 +859,38 @@ void GameTurnsPassedChar(int party_slot, unsigned int minutes)
 
     if (health_scale > g_float_zero &&
         character->hp_current < static_cast<unsigned int>(character->uiHPMax)) {
+        /* Found by the w8diff harness: retail 0x005036F5..0x00503748 sums on the x87
+           stack (fild minutes, fmul rate, fmul scale, fadd accumulator), stores the float
+           copy, hands the __ftol of the UNROUNDED sum to the heal, then subtracts the
+           stored copy's own __ftol (RegenAccumulatorRemainder). Same for the stamina
+           and spell channels below. */
+        double sum = static_cast<double>(minutes) * character->health_regen_rate * health_scale +
+                     character->health_regen_accumulator;
+        character->health_regen_accumulator = static_cast<float>(sum);
+        HealCharacter(party_slot, RetailFtol(sum), false);
         character->health_regen_accumulator =
-            minutes * character->health_regen_rate * health_scale +
-            character->health_regen_accumulator;
-        HealCharacter(party_slot, static_cast<int>(character->health_regen_accumulator), false);
-        character->health_regen_accumulator =
-            character->health_regen_accumulator -
-            static_cast<unsigned int>(character->health_regen_accumulator);
+            RegenAccumulatorRemainder(character->health_regen_accumulator);
     }
     if (stamina_scale > g_float_zero && character->stamina < character->uiStaminaMax) {
-        character->stamina_regen_accumulator =
-            minutes * character->stamina_regen_rate * stamina_scale +
+        double sum =
+            static_cast<double>(minutes) * character->stamina_regen_rate * stamina_scale +
             character->stamina_regen_accumulator;
-        RestoreCharacterStamina(party_slot, static_cast<int>(character->stamina_regen_accumulator),
-                                false);
+        character->stamina_regen_accumulator = static_cast<float>(sum);
+        RestoreCharacterStamina(party_slot, RetailFtol(sum), false);
         character->stamina_regen_accumulator =
-            character->stamina_regen_accumulator -
-            static_cast<unsigned int>(character->stamina_regen_accumulator);
+            RegenAccumulatorRemainder(character->stamina_regen_accumulator);
     }
     if (spell_scale > g_float_zero) {
         for (realm = 0; realm < W8_SPELL_REALM_COUNT; ++realm) {
             if (character->iSPLeft[realm] < character->sp_max[realm]) {
+                double sum = static_cast<double>(minutes) *
+                                 character->spell_regen_rates[realm * 2] * spell_scale +
+                             character->spell_regen_rates[realm * 2 + 1];
+                character->spell_regen_rates[realm * 2 + 1] = static_cast<float>(sum);
+                RestoreCharacterRealmSpellPoints(party_slot, static_cast<W8SpellRealm>(realm),
+                                                 RetailFtol(sum));
                 character->spell_regen_rates[realm * 2 + 1] =
-                    minutes * character->spell_regen_rates[realm * 2] * spell_scale +
-                    character->spell_regen_rates[realm * 2 + 1];
-                RestoreCharacterRealmSpellPoints(
-                    party_slot, static_cast<W8SpellRealm>(realm),
-                    static_cast<int>(character->spell_regen_rates[realm * 2 + 1]));
-                character->spell_regen_rates[realm * 2 + 1] =
-                    character->spell_regen_rates[realm * 2 + 1] -
-                    static_cast<unsigned int>(character->spell_regen_rates[realm * 2 + 1]);
+                    RegenAccumulatorRemainder(character->spell_regen_rates[realm * 2 + 1]);
             }
         }
     }
@@ -943,13 +987,16 @@ void AgeMonsterSight(W8MonsterInfo* monster_info, unsigned int minutes,
 
                 MoveMonsterGroupToPosition(group, &notify_position, monster->GetYaw(), false, false,
                                            false, false);
+                /* Retail 0x00503b66: edi walks the ORIGINAL group's allied_group_ids; the ally
+                   pointer is only passed to MoveMonsterGroupToPosition, never stored back. */
                 for (int index = 0; index < 4; ++index) {
                     if (group->allied_group_ids[index] != 0) {
-                        group_index = GetMonsterGroupIndexByID(
+                        float yaw = monster->GetYaw();
+                        unsigned int ally_index = GetMonsterGroupIndexByID(
                             0x4d9, GAMEPLAYTIME_CPP, group->allied_group_ids[index], true);
-                        group = GetMonsterGroupByListIndex(group_index);
-                        MoveMonsterGroupToPosition(group, &notify_position, monster->GetYaw(),
-                                                   false, false, false, false);
+                        W8MonsterGroup* ally = GetMonsterGroupByListIndex(ally_index);
+                        MoveMonsterGroupToPosition(ally, &notify_position, yaw, false, false,
+                                                   false, false);
                     }
                 }
             }
@@ -1010,15 +1057,17 @@ void AgeMonsterSight(W8MonsterInfo* monster_info, unsigned int minutes,
                                 MoveMonsterGroupToPosition(group, &notify_position,
                                                            monster->GetYaw(), false, false, false,
                                                            false);
+                                /* Retail 0x00503dfd: walks the original group's allied_group_ids;
+                                   the ally pointer never replaces the group. */
                                 for (int index = 0; index < 4; ++index) {
                                     if (group->allied_group_ids[index] != 0) {
-                                        group_index = GetMonsterGroupIndexByID(
+                                        float yaw = monster->GetYaw();
+                                        unsigned int ally_index = GetMonsterGroupIndexByID(
                                             0x516, GAMEPLAYTIME_CPP, group->allied_group_ids[index],
                                             true);
-                                        group = GetMonsterGroupByListIndex(group_index);
-                                        MoveMonsterGroupToPosition(group, &notify_position,
-                                                                   monster->GetYaw(), false, false,
-                                                                   false, false);
+                                        W8MonsterGroup* ally = GetMonsterGroupByListIndex(ally_index);
+                                        MoveMonsterGroupToPosition(ally, &notify_position, yaw,
+                                                                   false, false, false, false);
                                     }
                                 }
                                 cleared = true;
@@ -1062,15 +1111,17 @@ void AgeMonsterSight(W8MonsterInfo* monster_info, unsigned int minutes,
 
                             MoveMonsterGroupToPosition(group, &notify_position, monster->GetYaw(),
                                                        false, false, false, false);
+                            /* Retail 0x0050403a: walks the original group's allied_group_ids;
+                               the ally pointer never replaces the group. */
                             for (int index = 0; index < 4; ++index) {
                                 if (group->allied_group_ids[index] != 0) {
-                                    group_index = GetMonsterGroupIndexByID(
+                                    float yaw = monster->GetYaw();
+                                    unsigned int ally_index = GetMonsterGroupIndexByID(
                                         0x542, GAMEPLAYTIME_CPP, group->allied_group_ids[index],
                                         true);
-                                    group = GetMonsterGroupByListIndex(group_index);
-                                    MoveMonsterGroupToPosition(group, &notify_position,
-                                                               monster->GetYaw(), false, false,
-                                                               false, false);
+                                    W8MonsterGroup* ally = GetMonsterGroupByListIndex(ally_index);
+                                    MoveMonsterGroupToPosition(ally, &notify_position, yaw, false,
+                                                               false, false, false);
                                 }
                             }
                         }
@@ -1168,7 +1219,10 @@ after_early: {
             if (amount < 0) {
                 FatigueMonster(monster_info, -amount, 0);
             }
-        } else if (monster_info->stamina < monster_info->stamina_max) {
+        } else if (static_cast<unsigned int>(monster_info->stamina) <
+                   static_cast<unsigned int>(monster_info->stamina_max)) {
+            /* Retail 0x00504263 (and 0x00504331, 0x005043e8 below) compares the monster
+               stamina unsigned (jae / jb) (found by the w8diff harness). */
             RestoreMonsterStamina(monster_info, amount, false);
         }
     }
@@ -1188,23 +1242,30 @@ after_early: {
             heal_scale *= g_navigator_vertical_phase_step;
         }
         if (heal_scale > g_float_zero) {
+            /* Retail 0x005042eb..0x00504376: the same x87 accumulation as the character
+               regen in GameTurnsPassedChar - __ftol of the unrounded sum for the restore,
+               float copy stored, remainder through RegenAccumulatorRemainder (found by the
+               w8diff harness). */
             if (monster_info->hp_current < static_cast<unsigned int>(monster_info->uiHPMax)) {
+                double sum = static_cast<double>(minutes) * monster_info->hp_regen_rate *
+                                 heal_scale +
+                             monster_info->hp_regen_accumulator;
+
+                monster_info->hp_regen_accumulator = static_cast<float>(sum);
+                HealMonster(monster_info, RetailFtol(sum), false);
                 monster_info->hp_regen_accumulator =
-                    minutes * monster_info->hp_regen_rate * heal_scale +
-                    monster_info->hp_regen_accumulator;
-                int healed = static_cast<int>(monster_info->hp_regen_accumulator);
-
-                HealMonster(monster_info, healed, false);
-                monster_info->hp_regen_accumulator -= static_cast<float>(healed);
+                    RegenAccumulatorRemainder(monster_info->hp_regen_accumulator);
             }
-            if (monster_info->stamina < monster_info->stamina_max) {
-                monster_info->stamina_regen_accumulator =
-                    minutes * monster_info->stamina_regen_rate * heal_scale +
-                    monster_info->stamina_regen_accumulator;
-                int restored = static_cast<int>(monster_info->stamina_regen_accumulator);
+            if (static_cast<unsigned int>(monster_info->stamina) <
+                static_cast<unsigned int>(monster_info->stamina_max)) {
+                double sum = static_cast<double>(minutes) * monster_info->stamina_regen_rate *
+                                 heal_scale +
+                             monster_info->stamina_regen_accumulator;
 
-                RestoreMonsterStamina(monster_info, restored, false);
-                monster_info->stamina_regen_accumulator -= static_cast<float>(restored);
+                monster_info->stamina_regen_accumulator = static_cast<float>(sum);
+                RestoreMonsterStamina(monster_info, RetailFtol(sum), false);
+                monster_info->stamina_regen_accumulator =
+                    RegenAccumulatorRemainder(monster_info->stamina_regen_accumulator);
             }
         }
     }
@@ -1216,12 +1277,15 @@ after_early: {
         }
     }
     for (int enchant = 0; enchant < 8; ++enchant) {
-        float remaining = static_cast<float>(monster_info->enchantments[enchant].turns);
+        /* Retail 0x005043aa..0x005043c5 counts the turns down as plain unsigned dwords;
+           going through a float rounded 0xfffffff0 up to 2^32, whose unsigned cast came
+           out below 9999 and cleared the slot (SetMonsterSpellIcon on the monster's
+           representation) - found by the w8diff harness. */
+        unsigned int turns = monster_info->enchantments[enchant].turns;
 
-        if (remaining != 0.0f && static_cast<unsigned int>(remaining) < W8_CONDITION_INDEFINITE) {
-            if (minutes < static_cast<unsigned int>(remaining)) {
-                monster_info->enchantments[enchant].turns =
-                    static_cast<int>(remaining) - static_cast<int>(minutes);
+        if (turns != 0 && turns < W8_CONDITION_INDEFINITE) {
+            if (turns > minutes) {
+                monster_info->enchantments[enchant].turns = turns - minutes;
             } else {
                 ClearMonsterEnchantmentSlot(monster_info->location_id,
                                             static_cast<W8EnchantmentSlot>(enchant));
@@ -1231,7 +1295,8 @@ after_early: {
     if (static_cast<unsigned int>(monster_info->uiHPMax) <= monster_info->hp_current) {
         monster_info->hp_regen_accumulator = 0.0f;
     }
-    if (monster_info->stamina_max <= monster_info->stamina) {
+    if (static_cast<unsigned int>(monster_info->stamina_max) <=
+        static_cast<unsigned int>(monster_info->stamina)) {
         monster_info->stamina_regen_accumulator = 0.0f;
     }
     {
@@ -1351,7 +1416,11 @@ void UpdatePartyStamina(int ticks)
             continue;
         }
         W8Character* character = &g_status.buffers.Char[slot];
-        if (character->highest_condition >= W8_CONDITION_DEAD &&
+        /* Retail 0x005046bb compares the condition unsigned (cmp 0x12 / jb), so a
+           condition >= 0x80000000 only ticks while swallowed (found by the w8diff
+           harness). */
+        if (static_cast<unsigned int>(character->highest_condition) >=
+                static_cast<unsigned int>(W8_CONDITION_DEAD) &&
             (character->uiCondition[W8_CONDITION_DEAD] != 0 ||
              !GetConditionRecordFlag(slot, W8_DEPENDENCE_SWALLOWED))) {
             continue;
@@ -1407,11 +1476,16 @@ void RegenCharacterStamina(int party_slot, unsigned int elapsed)
         }
     }
     if (scale > g_float_zero && character->stamina < character->uiStaminaMax) {
-        character->stamina_regen_accumulator += elapsed * character->stamina_regen_rate * scale;
-        int amount = static_cast<int>(character->stamina_regen_accumulator);
-        RestoreCharacterStamina(party_slot, amount, false);
-        character->stamina_regen_accumulator -=
-            static_cast<float>(static_cast<int>(character->stamina_regen_accumulator));
+        /* Found by the w8diff harness: retail 0x0050486f..0x005048b6 sums
+           elapsed * rate * scale + accumulator on the x87 stack, restores the __ftol
+           of the unrounded sum and keeps the remainder of the stored float copy
+           (RegenAccumulatorRemainder), like GameTurnsPassedChar. */
+        double sum = static_cast<double>(elapsed) * character->stamina_regen_rate * scale +
+                     character->stamina_regen_accumulator;
+        character->stamina_regen_accumulator = static_cast<float>(sum);
+        RestoreCharacterStamina(party_slot, RetailFtol(sum), false);
+        character->stamina_regen_accumulator =
+            RegenAccumulatorRemainder(character->stamina_regen_accumulator);
     }
     if (character->stamina >= character->uiStaminaMax) {
         character->stamina_regen_accumulator = g_float_zero;

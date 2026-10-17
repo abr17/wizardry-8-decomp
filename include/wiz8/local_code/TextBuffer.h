@@ -78,6 +78,17 @@ public:
         m_geometryDirty = true;
         m_layoutMode = mode;
     }
+    /* Mod (wide windows): text alignment (g_W8TextBufferAlign*) - the options
+       window uses it to pick which canvas edge a label goes to. */
+    unsigned int GetLayoutMode() const
+    {
+        return m_layoutMode;
+    }
+    /* Mod (resolution list in options): where the label is located. */
+    const W8ControlsRect& GetLayoutBounds() const
+    {
+        return m_layoutBounds;
+    }
 
     virtual ~W8TextBuffer();
 

@@ -1017,8 +1017,7 @@ bool LoadItemStatus(W8Chunk* chunk, int level)
 
 /* Fold the shipped per-level status file into the live state - the baseline a
    save's section is layered over. The path build is the same table walk
-   BuildLevelStatusPath spells out, but the basename search starts four
-   characters into the file name and the file itself is opened and walked here.
+   BuildLevelStatusPath spells out, and the file itself is opened and walked here.
    Only the persistent-state chunks are taken: cursor nodes, generators and
    both trigger-state records. The level number the LVLS group carries is read
    and discarded; the file is already level-specific. */
@@ -1035,7 +1034,9 @@ bool LoadDefaultLevelStatus(unsigned int level)
         srAssertFail("LevelFilesExist(ulLevel, &LevelName)",
                      "C:\\Projects\\Wizardry 8\\Local Code\\LoadSaveGame.cpp", 0x366, 0);
     }
-    *strchr(info.level_file_name + 4, '.') = '\0';
+    /* Retail 0x00513a26: strchr from info+0x64, the start of level_file_name
+       (same as BuildLevelStatusPath), not four characters in. */
+    *strchr(info.level_file_name, '.') = '\0';
     if (level < 0x39) {
         if (level == 0x38) {
             sprintf(path, "%s\\Test\\DefaultLevel.%s", "Levels", "STS");
@@ -1599,6 +1600,8 @@ bool MarkCurrentGameCharacterChunkConsumed(const char* path)
             chunk.OpenChunk(0, 0);
             if (chunk.CurrentChunkAtEnd() == 0 && chunk.CurrentChunkId() == W8_SAVE_TAG_CHAR) {
                 chunk.Read(name, 0x40, 0);
+                /* Retail 0x0051554d: name[63] = 0 (bl, always 0 here) before the compare. */
+                name[0x3f] = 0;
                 if (_stricmp(name, path) == 0) {
                     chunk.SetCurrentChunkAtEnd();
                     found = true;
@@ -1651,6 +1654,8 @@ bool LoadCharacterFromCurrentGame(const char* path, W8Character* character)
             chunk.OpenChunk(0, 0);
             if (chunk.CurrentChunkAtEnd() == 0 && chunk.CurrentChunkId() == W8_SAVE_TAG_CHAR) {
                 chunk.Read(name, 0x40, 0);
+                /* Retail 0x0051578a: name[63] = 0 (bl, always 0 here) before the compare. */
+                name[0x3f] = 0;
                 if (_stricmp(name, path) == 0) {
                     memset(character, 0, sizeof(W8Character));
                     chunk.Read(&size, 4, 0);

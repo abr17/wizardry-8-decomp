@@ -383,8 +383,8 @@ void SetSkyEnabled(bool enabled)
             return;
         }
         g_world->camera->setEnvironmentRange(
-            static_cast<float>(WorldGetFarClip(g_world)) * g_world->environment_range_start,
-            static_cast<float>(WorldGetFarClip(g_world)) * g_world->environment_range_end);
+            static_cast<float>(WorldGetRenderFarClip(g_world)) * g_world->environment_range_start,
+            static_cast<float>(WorldGetRenderFarClip(g_world)) * g_world->environment_range_end);
         return;
     }
 
@@ -397,7 +397,7 @@ void SetSkyEnabled(bool enabled)
     if (g_world == 0 || g_world->camera == 0) {
         return;
     }
-    g_world->camera->setEnvironmentRange(0.0f, static_cast<float>(WorldGetFarClip(g_world)));
+    g_world->camera->setEnvironmentRange(0.0f, static_cast<float>(WorldGetRenderFarClip(g_world)));
 }
 
 /* The far plane the world is drawn to. */
@@ -646,17 +646,19 @@ bool IsSkyEnabled(void)
 }
 
 /* Refresh the two fog objects' ranges from the world's far clip. Runs after
-   the camera's clip range moves, so the fog tracks the same plane. */
+   the camera's clip range moves, so the fog tracks the same plane.
+   Mod: fog and depth cue (SetSkyEnabled) take the render far plane
+   (WorldGetRenderFarClip), not the gameplay distance - see 3d.h. */
 // FUNCTION: WIZ8 0x004836A0
 void RefreshFogRanges(void)
 {
     if (g_environment_object0 != 0 && g_world != 0) {
-        g_environment_object0->fog_end = WorldGetFarClip(g_world) * g_world->environment_range_end;
+        g_environment_object0->fog_end = WorldGetRenderFarClip(g_world) * g_world->environment_range_end;
         g_environment_object0->fog_start =
-            WorldGetFarClip(g_world) * g_world->environment_range_start;
+            WorldGetRenderFarClip(g_world) * g_world->environment_range_start;
         g_environment_object1->fog_start =
-            WorldGetFarClip(g_world) * g_world->environment_range_start;
-        g_environment_object1->fog_end = WorldGetFarClip(g_world) * g_world->environment_range_end;
+            WorldGetRenderFarClip(g_world) * g_world->environment_range_start;
+        g_environment_object1->fog_end = WorldGetRenderFarClip(g_world) * g_world->environment_range_end;
     }
 }
 

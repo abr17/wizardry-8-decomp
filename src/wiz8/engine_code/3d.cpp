@@ -15,6 +15,7 @@
 #include "wiz8/engine_code/stMeshModel.h"
 #include "wiz8/engine_code/PolyPick.h"
 #include "wiz8/float_constants.h"
+#include "wiz8/canvas.h" /* mod: DisplayViewDistanceScale */
 #include "wiz8/geometry.h"
 #include "wiz8/sr_api.h"
 #include "surrender/srCamera.h"
@@ -905,6 +906,20 @@ float WorldGetRenderRange(W8World* world)
    near plane is the fixed 62.5 the original materialises inline. The guard is
    against a denormal-scale epsilon rather than zero, so a distance that has
    collapsed leaves the camera as it was. */
+/* Mod (draw distance, wiz8wide.ini [Display] ViewDistance, canvas.h):
+   the camera gets a far plane = gameplay distance x k, while
+   WorldGetFarClip still returns the gameplay distance (monster sight,
+   group loading, AI, spells depend on it). Only rendering (fog,
+   depth cue, octree visibility) reads WorldGetRenderFarClip. The sky
+   world is not scaled. With k = 1 everything is bit-for-bit as in the original. */
+double WorldGetRenderFarScale(W8World* world)
+{
+    if (world == 0 || world == g_secondary_world) {
+        return 1.0;
+    }
+    return DisplayViewDistanceScale();
+}
+
 // FUNCTION: WIZ8 0x0046e3d0
 void WorldSetFarClip(W8World* world, float distance)
 {
@@ -912,7 +927,7 @@ void WorldSetFarClip(W8World* world, float distance)
         srAssertFail("pWorld", THREE_D_CPP, 0x29e, 0);
     }
     if (distance > 5.9604644775390625e-008) {
-        world->camera->setClipRange(62.5, distance);
+        world->camera->setClipRange(62.5, distance * WorldGetRenderFarScale(world)); /* mod */
         RefreshFogRanges();
         MarkRendererReady();
     }
@@ -923,6 +938,20 @@ void WorldSetFarClip(W8World* world, float distance)
    camera answers zero rather than reading through it. */
 // FUNCTION: WIZ8 0x0046e440
 double WorldGetFarClip(W8World* world)
+{
+    double near_plane = 0;
+    double far_plane = 0;
+
+    if (world != 0 && world->camera != 0) {
+        world->camera->getClipRange(near_plane, far_plane);
+    }
+    /* Mod: the gameplay distance (see WorldGetRenderFarScale). */
+    double scale = WorldGetRenderFarScale(world);
+    return scale == 1.0 ? far_plane : far_plane / scale;
+}
+
+/* Mod: the real camera far plane - for rendering only. */
+double WorldGetRenderFarClip(W8World* world)
 {
     double near_plane = 0;
     double far_plane = 0;

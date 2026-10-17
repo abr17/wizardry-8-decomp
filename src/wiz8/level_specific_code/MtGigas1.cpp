@@ -126,8 +126,10 @@ bool MtGigas1PressurePlate(Trigger* pTrigger)
     position.z = static_cast<float>(camera_position.z);
     g_plate_prop->ComputeBounds(&minimum, &maximum);
     g_plate_contact = false;
-    if ((position.x >= minimum.x && position.x <= maximum.x && position.z >= minimum.z &&
-         position.z <= maximum.z) ||
+    /* Retail 0x004DBC33/0x004DBC51: upper bounds are "not greater" (test ah,0x41),
+       so a NaN maximum counts as inside; !(a > b) keeps that x87 NaN behavior. */
+    if ((position.x >= minimum.x && !(position.x > maximum.x) && position.z >= minimum.z &&
+         !(position.z > maximum.z)) ||
         g_plate_prop->HasSupportedItems()) {
         g_plate_contact = true;
         if (g_plate_down) {

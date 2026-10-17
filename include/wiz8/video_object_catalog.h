@@ -18,7 +18,9 @@ struct W8VideoFrame {
     unsigned int handle;
 };
 
-extern W8VideoObjectSlot g_video_slots[494];
+/* 0x1ec static/reserved slots + 1000 item-image slots (see PC Item.cpp). */
+#define W8_VIDEO_SLOT_COUNT (0x1ec + 1000)
+extern W8VideoObjectSlot g_video_slots[W8_VIDEO_SLOT_COUNT];
 extern W8VideoFrame g_video_frames[1658];
 
 unsigned int GetCatalogVideoObjectHandle(int object, int frame);

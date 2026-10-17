@@ -421,7 +421,10 @@ void RecountActiveMonsterGroupMembers(W8MonsterGroup* monster_group)
     for (index = 0; index < ILLength(monster_group->monsters); ++index) {
         monster_info = MonsterGetScriptPartByLocationIndex(MonsterGetIndexByLocationID(
             0x412, MONSTER_GROUP_CPP, IListGetAt(monster_group->monsters, index), true));
-        if (monster_info->highest_condition < W8_CONDITION_TURNCOAT &&
+        /* Retail 0x005103a0 compares the condition unsigned (cmp ecx,0xd / jae), so
+           a condition >= 0x80000000 is not active (found by the w8diff harness). */
+        if (static_cast<unsigned int>(monster_info->highest_condition) <
+                static_cast<unsigned int>(W8_CONDITION_TURNCOAT) &&
             monster_info->control_state != W8_MONSTER_CONTROL_LURED) {
             ++active;
         }
@@ -1091,7 +1094,9 @@ W8MonsterGroup* CreateGroup(unsigned int monster_id, unsigned int count,
 
     group->members_active = true;
     yaw = GetCameraFacingYaw(position);
-    MoveMonsterGroupToPosition(group, position, yaw, false, false, false, false);
+    /* Retail 0x0050F388: flatten_y = (place_on_ground == 0), so unsettled spawns
+       keep the source height instead of being snapped to the ground. */
+    MoveMonsterGroupToPosition(group, position, yaw, false, false, !place_on_ground, false);
     RefreshMonsterGroup(group);
     SetMonsterGroupHostility(group, MonsterGroupCalcDefaultDisposition(group), false);
 
@@ -1262,7 +1267,10 @@ void ElectGroupLeaderMember(W8MonsterGroup* monster_group)
             W8Monster* member = GetMonsterByLocationID(member_id);
             W8MonsterInfo* member_info = MonsterGetScriptPartByLocationIndex(
                 MonsterGetIndexByLocationID(0x443, MONSTER_GROUP_CPP, member_id, true));
-            if (member_info->highest_condition < W8_CONDITION_TURNCOAT &&
+            /* Retail 0x005104a7: cmp ecx,0xd / jae - the condition is compared
+               unsigned, so >= 0x80000000 cannot lead (found by the w8diff harness). */
+            if (static_cast<unsigned int>(member_info->highest_condition) <
+                    static_cast<unsigned int>(W8_CONDITION_TURNCOAT) &&
                 (member->runtime_flags & W8_MONSTER_REMOVE_NOW) == 0 &&
                 best < static_cast<unsigned int>(member->movement.leadership_rank)) {
                 best = member->movement.leadership_rank;
@@ -1670,7 +1678,11 @@ void SetMonsterGroupEngagementState(int group_id, bool state)
 
     group = GetMonsterGroupByListIndex(
         GetMonsterGroupIndexByID(0x914, MONSTER_GROUP_CPP, group_id, true));
-    if ((group->monster_id == 0x1b6 || group->monster_id == 0x234) && state) {
+    /* Retail 0x00511c17: cmp bl,1 - only the exact byte 1 returns early, so a
+       non-canonical state byte (2, 0xff) is stored like any other. Read the
+       argument byte itself (found by the w8diff harness). */
+    if ((group->monster_id == 0x1b6 || group->monster_id == 0x234) &&
+        *reinterpret_cast<const unsigned char*>(&state) == 1) {
         return;
     }
     if (group->engagement != state) {
@@ -1680,16 +1692,19 @@ void SetMonsterGroupEngagementState(int group_id, bool state)
     if (group->engagement) {
         ++group->engagement_ticks;
     }
+    /* Retail 0x00511C47: lea esi,[group+0xA7] once; the loop always walks the
+       original group's ally array, the ally pointer never replaces it. */
+    int* allies = group->allied_group_ids;
     for (ally_index = 0; ally_index < W8_MONSTER_GROUP_ALLY_COUNT; ++ally_index) {
-        if (group->allied_group_ids[ally_index] != 0) {
-            group = GetMonsterGroupByListIndex(GetMonsterGroupIndexByID(
-                0x932, MONSTER_GROUP_CPP, group->allied_group_ids[ally_index], true));
-            if (group->engagement != state) {
-                group->engagement = state;
-                group->engagement_ticks = 0;
+        if (allies[ally_index] != 0) {
+            W8MonsterGroup* ally = GetMonsterGroupByListIndex(GetMonsterGroupIndexByID(
+                0x932, MONSTER_GROUP_CPP, allies[ally_index], true));
+            if (ally->engagement != state) {
+                ally->engagement = state;
+                ally->engagement_ticks = 0;
             }
-            if (group->engagement) {
-                ++group->engagement_ticks;
+            if (ally->engagement) {
+                ++ally->engagement_ticks;
             }
         }
     }

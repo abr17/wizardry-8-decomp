@@ -94,6 +94,7 @@ BOOLEAN gfShowFastHelp = TRUE;
 // GLOBAL: WIZ8 0x005ff7d0
 MOUSE_REGION MSYS_SystemBaseRegion = {MSYS_ID_SYSTEM,
                                       MSYS_PRIORITY_SYSTEM,
+                                      W8_ANCHOR_CENTER, /* wide canvas: bLayoutAnchor */
                                       BASE_REGION_FLAGS,
                                       -32767,
                                       -32767,
@@ -114,6 +115,15 @@ MOUSE_REGION MSYS_SystemBaseRegion = {MSYS_ID_SYSTEM,
                                       MSYS_NO_CALLBACK,
                                       NULL,
                                       NULL};
+
+/* Wide canvas layout A: the mouse x as the region sees it. The game mouse x
+   spans the whole canvas (-ox .. 639+ox); a left/right-anchored region keeps
+   its 640-space bounds and subtracts its anchor shift (-ox / +ox) instead.
+   0 shift for every region when the layout is off: retail behaviour. */
+static INT16 MSYS_RegionMouseX(const MOUSE_REGION* region)
+{
+    return (INT16)(MSYS_CurrentMX - CanvasAnchorShift(region->bLayoutAnchor));
+}
 
 // GLOBAL: WIZ8 0x00650ea0
 BOOLEAN gfRefreshUpdate = FALSE;
@@ -496,9 +506,9 @@ void MSYS_UpdateMouseRegion(void)
 
     while (!found && MSYS_CurrRegion) {
         if (MSYS_CurrRegion->uiFlags & (MSYS_REGION_ENABLED | MSYS_ALLOW_DISABLED_FASTHELP) &&
-            (MSYS_CurrRegion->RegionTopLeftX <= MSYS_CurrentMX) && // Check boundaries
+            (MSYS_CurrRegion->RegionTopLeftX <= MSYS_RegionMouseX(MSYS_CurrRegion)) && // Check boundaries
             (MSYS_CurrRegion->RegionTopLeftY <= MSYS_CurrentMY) &&
-            (MSYS_CurrRegion->RegionBottomRightX >= MSYS_CurrentMX) &&
+            (MSYS_CurrRegion->RegionBottomRightX >= MSYS_RegionMouseX(MSYS_CurrRegion)) &&
             (MSYS_CurrRegion->RegionBottomRightY >= MSYS_CurrentMY)) {
             // We got the right region. We don't need to check for priorities 'cause
             // the whole list is sorted the right way!
@@ -573,9 +583,9 @@ void MSYS_UpdateMouseRegion(void)
                 pTempRegion = MSYS_CurrRegion->next;
                 while ((pTempRegion != NULL) && (!fFound)) {
                     if ((pTempRegion->uiFlags & MSYS_REGION_ENABLED) &&
-                        (pTempRegion->RegionTopLeftX <= MSYS_CurrentMX) &&
+                        (pTempRegion->RegionTopLeftX <= MSYS_RegionMouseX(pTempRegion)) &&
                         (pTempRegion->RegionTopLeftY <= MSYS_CurrentMY) &&
-                        (pTempRegion->RegionBottomRightX >= MSYS_CurrentMX) &&
+                        (pTempRegion->RegionBottomRightX >= MSYS_RegionMouseX(pTempRegion)) &&
                         (pTempRegion->RegionBottomRightY >= MSYS_CurrentMY) &&
                         (pTempRegion->uiFlags & MSYS_SET_CURSOR)) {
                         fFound = TRUE;
@@ -593,9 +603,10 @@ void MSYS_UpdateMouseRegion(void)
             (gfClickedModeOn && gusClickedIDNumber == MSYS_CurrRegion->IDNumber)) {
             MSYS_CurrRegion->uiFlags |= MSYS_MOUSE_IN_AREA;
 
-            MSYS_CurrRegion->MouseXPos = MSYS_CurrentMX;
+            MSYS_CurrRegion->MouseXPos = MSYS_RegionMouseX(MSYS_CurrRegion);
             MSYS_CurrRegion->MouseYPos = MSYS_CurrentMY;
-            MSYS_CurrRegion->RelativeXPos = MSYS_CurrentMX - MSYS_CurrRegion->RegionTopLeftX;
+            MSYS_CurrRegion->RelativeXPos =
+                MSYS_RegionMouseX(MSYS_CurrRegion) - MSYS_CurrRegion->RegionTopLeftX;
             MSYS_CurrRegion->RelativeYPos = MSYS_CurrentMY - MSYS_CurrRegion->RegionTopLeftY;
 
             MSYS_CurrRegion->ButtonState = MSYS_CurrentButtons;
@@ -712,9 +723,10 @@ void MSYS_UpdateMouseRegion(void)
 
             // OK, you still want move messages however....
             MSYS_CurrRegion->uiFlags |= MSYS_MOUSE_IN_AREA;
-            MSYS_CurrRegion->MouseXPos = MSYS_CurrentMX;
+            MSYS_CurrRegion->MouseXPos = MSYS_RegionMouseX(MSYS_CurrRegion);
             MSYS_CurrRegion->MouseYPos = MSYS_CurrentMY;
-            MSYS_CurrRegion->RelativeXPos = MSYS_CurrentMX - MSYS_CurrRegion->RegionTopLeftX;
+            MSYS_CurrRegion->RelativeXPos =
+                MSYS_RegionMouseX(MSYS_CurrRegion) - MSYS_CurrRegion->RegionTopLeftX;
             MSYS_CurrRegion->RelativeYPos = MSYS_CurrentMY - MSYS_CurrRegion->RegionTopLeftY;
 
             if ((MSYS_CurrRegion->uiFlags & MSYS_MOVE_CALLBACK) && (MSYS_Action & MSYS_DO_MOVE)) {
@@ -750,6 +762,11 @@ void MSYS_DefineRegion(MOUSE_REGION* region, UINT16 tlx, UINT16 tly, UINT16 brx,
         priority = MSYS_PRIORITY_HIGHEST;
 
     region->PriorityLevel = priority;
+    /* Mod: anchor to a canvas edge - formerly an alignment padding byte. Neither this code
+       nor retail wrote it, and GUI_BUTTON comes from malloc: dialog buttons
+       (CreateTextButton) got garbage and occasionally drew / caught the mouse
+       shifted by ox. Default is centered; the edge is set after this. */
+    region->bLayoutAnchor = W8_ANCHOR_CENTER;
 
     region->uiFlags = MSYS_NO_FLAGS;
 
@@ -990,13 +1007,18 @@ void DisplayFastHelp(MOUSE_REGION* region)
         iW = VideoGetToolTipWidth();
         iH = VideoGetToolTipHeight();
 
-        iX = (INT32)region->RegionTopLeftX + 10;
+        /* Wide canvas layout A: an anchored button's help goes next to where
+           the button really is, and may use the whole canvas width. */
+        INT32 iShift = CanvasAnchorShift(region->bLayoutAnchor);
+        INT32 iLow = CanvasWideLayoutActive() ? -g_canvas_ox : 0;
+        INT32 iHigh = SCREEN_WIDTH + (CanvasWideLayoutActive() ? g_canvas_ox : 0);
+        iX = (INT32)region->RegionTopLeftX + iShift + 10;
 
-        if (iX < 0)
-            iX = 0;
+        if (iX < iLow)
+            iX = iLow;
 
-        if ((iX + iW) >= SCREEN_WIDTH)
-            iX = (SCREEN_WIDTH - iW - 4);
+        if ((iX + iW) >= iHigh)
+            iX = (iHigh - iW - 4);
 
         iY = (INT32)region->RegionTopLeftY - (iH * 3 / 4);
         if (iY < 0)

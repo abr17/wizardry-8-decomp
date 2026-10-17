@@ -34,10 +34,52 @@ w8_ulong stTexture2D::getTextureFrameHandle()
     return frame_handle;
 }
 
+/* Mod (2D seams): how many texels to extend past the image edge. When stretching
+   to the screen, the bilinear filter takes the neighboring texel at the right/bottom
+   edge of the image; with the CORRECT_BLURRED_TEXT half-pixel offset - up to two. */
+enum { TILE_EDGE_TEXELS = 2 };
+
+/* A tile that sticks out past the surface edge (the last column/row of tiles, or with
+   a single texture for the whole layer - the right and bottom border) holds garbage
+   past the edge, and the filter was blending it into the last column/row. We extend
+   the outermost column and row of the image by TILE_EDGE_TEXELS. x0..x1, y0..y1 -
+   the just-uploaded piece in texture coordinates. */
+static void ExtendTileEdges(srColorSurfaceIFace& destination, const stTexture2D& tile, int x0,
+                            int y0, int x1, int y1)
+{
+    int content_w = tile.surface->getWidth() - tile.left;
+    int content_h = tile.surface->getHeight() - tile.top;
+    if (content_w <= 0 || content_h <= 0) {
+        return;
+    }
+    int edge_x = content_w + TILE_EDGE_TEXELS;
+    if (edge_x > destination.getWidth()) {
+        edge_x = destination.getWidth();
+    }
+    int edge_y = content_h + TILE_EDGE_TEXELS;
+    if (edge_y > destination.getHeight()) {
+        edge_y = destination.getHeight();
+    }
+    if (x1 > content_w) {
+        int rows_end = y1 < content_h ? y1 : content_h;
+        for (int x = content_w; x < edge_x && x < x1; ++x) {
+            destination.blit(x, y0, destination, content_w - 1, y0, content_w, rows_end);
+        }
+    }
+    if (y1 > content_h) {
+        int columns_end = x1 < edge_x ? x1 : edge_x;
+        for (int y = content_h; y < edge_y && y < y1; ++y) {
+            destination.blit(x0, y, destination, x0, content_h - 1, columns_end, content_h);
+        }
+    }
+}
+
 // FUNCTION: WIZ8 0x0047E710
 void stTexture2D::getMipmapData(MultiRequest& request)
 {
-    request.destinations[request.mipmap_level]->blit(0, 0, *surface, left, top, right, bottom);
+    srColorSurfaceIFace* destination = request.destinations[request.mipmap_level];
+    destination->blit(0, 0, *surface, left, top, right, bottom);
+    ExtendTileEdges(*destination, *this, 0, 0, right - left, bottom - top);
 }
 
 // FUNCTION: WIZ8 0x0047E740
@@ -46,6 +88,8 @@ void stTexture2D::getMipmapLevelPartial(PartialRequest& request)
     request.destination->blit(request.destination_x, request.destination_y, *surface,
                               left + request.destination_x, top + request.destination_y,
                               left + request.source_right, top + request.source_bottom);
+    ExtendTileEdges(*request.destination, *this, request.destination_x, request.destination_y,
+                    request.source_right, request.source_bottom);
 }
 
 // FUNCTION: WIZ8 0x0047DE40
@@ -272,6 +316,17 @@ void stSurface2D::updateRectangle(srGERD* renderer, void*, w8_long, int left, in
         }
         if (texture->bottom - y < update_height) {
             update_height = texture->bottom - y;
+        }
+        /* Mod (2D seams): a piece at the right/bottom edge of the image is uploaded
+           together with the edge extension (ExtendTileEdges), otherwise the extension
+           does not reach the texture. */
+        if (x + update_width >= width && texture->right > x + update_width) {
+            int extra = texture->right - (x + update_width);
+            update_width += extra < TILE_EDGE_TEXELS ? extra : TILE_EDGE_TEXELS;
+        }
+        if (y + update_height >= height && texture->bottom > y + update_height) {
+            int extra = texture->bottom - (y + update_height);
+            update_height += extra < TILE_EDGE_TEXELS ? extra : TILE_EDGE_TEXELS;
         }
         if (texture_update_flags & UPDATE_FULL_TILE) {
             destination_x = 0;

@@ -3,6 +3,7 @@
 #include "wiz8/layouts/combat_state.h"
 #include "wiz8/local_code/Controls.h"
 #include "wiz8/local_screens/MGSUseItemSelect.h"
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/character_event_queue.h"
 #include "wiz8/dialog_code/AssayDialog.h"
 #include "wiz8/dialog_code/DialogBase.h"
@@ -154,6 +155,15 @@ static void CreateUseItemSelectControls(void)
     g_use_item_select_controls[5]->m_primaryActivationCallback = NoOp;
     g_use_item_select_controls[6]->m_primaryActivationCallback = NoOp;
     g_use_item_select_controls[8]->m_primaryActivationCallback = CloseUseItemSelection;
+    /* Wide canvas, layout A (2026-10-12): the "own / shared
+       items" toggles - at the left canvas edge, the item, filters and cancel - at the
+       right, the middle with the list is stretched by 2*ox. The list is the main
+       text window, it is already widened (SetMainTextBoxRegionBounds), so
+       long item names fit entirely. Outside the layout shifts
+       are zero. */
+    PlaceSubscreenPanel(g_use_item_select_panels[0], W8_SUBSCREEN_LEFT);
+    PlaceSubscreenPanel(g_use_item_select_panels[1], W8_SUBSCREEN_STRETCH);
+    PlaceSubscreenPanel(g_use_item_select_panels[2], W8_SUBSCREEN_RIGHT);
     for (panel_iter = g_use_item_select_panels; panel_iter < g_use_item_select_panels + 3;
          panel_iter++) {
         (*panel_iter)->SetEnabled(true);

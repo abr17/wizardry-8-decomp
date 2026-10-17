@@ -198,13 +198,17 @@ void W8SpellVisual::SetCycle(signed char cycle)
     lights = *host->light_lists[host->current_cycle].GetAt(0);
     DetachCycleLights(lights);
 
-    host->current_cycle = cycle;
-    animation = host->emitters[cycle];
+    /* Retail 0x004AC638: cycle -1 keeps the current cycle; the emitter, both
+       LOD probes and the attach loop re-read host->current_cycle afterwards. */
+    if (cycle != -1) {
+        host->current_cycle = cycle;
+    }
+    animation = host->emitters[host->current_cycle];
     host->active = 1;
     host->frame_direction = W8_ANIMATION_FORWARD;
-    if (host->SetCycleFrameLod(cycle, 0, 2) != 0) {
+    if (host->SetCycleFrameLod(host->current_cycle, 0, 2) != 0) {
         host->m_bLOD = 2;
-    } else if (host->SetCycleFrameLod(cycle, 0, 1) != 0) {
+    } else if (host->SetCycleFrameLod(host->current_cycle, 0, 1) != 0) {
         host->m_bLOD = 1;
     } else {
         host->m_bLOD = 0;
@@ -214,8 +218,11 @@ void W8SpellVisual::SetCycle(signed char cycle)
     host->animation_playing = animation->animation_playing;
     host->subcycle = 0;
 
+    /* Retail 0x004AC70C: SetLights indexes with the raw argument, the attach
+       loop (0x004AC735) re-reads host->current_cycle. */
     lights = *host->light_lists[cycle].GetAt(0);
     SetLights(lights);
+    lights = *host->light_lists[host->current_cycle].GetAt(0);
     AttachCycleLights(lights);
 
     if (m_plsParticles != 0) {
@@ -408,7 +415,9 @@ W8SpellEmitterHost::W8SpellEmitterHost(const W8SpellEmitterHost& other)
         }
     }
 
-    active = 1;
+    /* Retail 0x004AAE0E: a cloned host restarts as play-once; the activation
+       byte keeps what W8AnimRep's copy took from the source. */
+    pending_behaviour = W8_ANIMATION_PLAY_ONCE;
     current_cycle = other.current_cycle;
 
     for (emitter = 0; emitter < SPELL_NUM_CYCLES; ++emitter) {
@@ -424,9 +433,15 @@ W8SpellEmitterHost::W8SpellEmitterHost(const W8SpellEmitterHost& other)
     }
 }
 
+/* Retail takes the emitter slot from the THIRD argument - the cycle index
+   ReadGrCycleData forwards (0x004AB43A/0x004AB4B3 read [esp+0x34]); the
+   fourth (always 1 from LoadSpellVisualResource) is never read. With the
+   fourth, every .mls row landed in emitter 1: TARGET/EXPLOSION/CONE cycles
+   were missing, the Generic fallback kept its NEVER_STOP behaviour, the
+   visual never finished and combat stalled on the spell effect. */
 // FUNCTION: WIZ8 0x004AB340
-unsigned char W8SpellEmitterHost::ReadCycleData(W8ReadLevelInfo* info, W8SpellVisual* visual, int,
-                                                int emitter_index)
+unsigned char W8SpellEmitterHost::ReadCycleData(W8ReadLevelInfo* info, W8SpellVisual* visual,
+                                                int emitter_index, int)
 {
     W8GrowableVector<stLight*>* lights = new W8Vector<stLight*>;
     W8AnimObj* animation;

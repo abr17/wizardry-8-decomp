@@ -1,5 +1,6 @@
 #include "vsurface.h"
 #include "wiz8/bink_video.h"
+#include "wiz8/canvas.h"
 #include "wiz8/music_playlist.h"
 #include "wiz8/regions.h"
 #include "wiz8/engine_code/Video2.h"
@@ -48,7 +49,8 @@ unsigned char IntroScreenEnter(void)
 {
     char path[500];
 
-    SetClippingRegionAndImageWidth(0x500, 0, 0, 0x280, 0x1e0);
+    /* wide canvas: real pitch */
+    SetClippingRegionAndImageWidth(CanvasFrameBufferPitch(), 0, 0, 0x280, 0x1e0);
     SetFontDestBuffer(FRAME_BUFFER, 0, 0, 0x280, 0x1e0, 0);
     ClearSurfaceRect(0, 0, 0x280, 0x1e0);
     if (g_intro_video_index == 0 && g_settings.intro_seen && !g_status.intro_shown) {
@@ -104,6 +106,12 @@ void IntroScreenFrame(void)
     }
     if (gpVideo == 0 || gpVideo->UpdateFrame()) {
         AdvanceIntroScreen();
+    }
+    /* Borderless: the video screen never renders (retail frames went straight
+       to the exclusive primary surface). The player now writes into the 2D
+       canvas, so present it like any other screen while a video plays. */
+    if (gpVideo != 0 && DisplayVideosOnCanvas()) { /* borderless window and windowed mode */
+        RenderFrame();
     }
 }
 

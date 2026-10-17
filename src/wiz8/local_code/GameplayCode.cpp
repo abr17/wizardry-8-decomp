@@ -106,9 +106,12 @@ bool AnyMonsterEngaged(void)
 
     for (index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
         monster_info = MonsterGetScriptPartByLocationIndex(index);
+        /* Retail 0x004eee52 compares the condition unsigned (cmp 0xe / jb), so a
+           condition >= 0x80000000 is not engaged (found by the w8diff harness). */
         if (monster_info->fInCombat && monster_info->ubDisposition == W8_DISPOSITION_HOSTILE &&
             monster_info->hp_current != 0 &&
-            monster_info->highest_condition < W8_CONDITION_WEBBED) {
+            static_cast<unsigned int>(monster_info->highest_condition) <
+                static_cast<unsigned int>(W8_CONDITION_WEBBED)) {
             return true;
         }
     }
@@ -248,7 +251,10 @@ void RefreshLevelUpReadyNotices(void)
                 row->portrait_advance = 0;
             }
         } else if (character->hp_current != 0) {
-            if (character->highest_condition > W8_CONDITION_UNCONSCIOUS ||
+            /* Retail 0x004ef253 compares the condition unsigned (cmp 0x12 / jae), so a
+               condition >= 0x80000000 is never ready (found by the w8diff harness). */
+            if (static_cast<unsigned int>(character->highest_condition) >=
+                    static_cast<unsigned int>(W8_CONDITION_DEAD) ||
                 character->experience < character->experience_goal) {
                 if (character->hp_current != 0) {
                     if (*ready_flag != 0) {
@@ -314,7 +320,10 @@ bool IsCharacterReadyToAdvance(int party_slot)
     if (character->hp_current == 0) {
         return false;
     }
-    if (character->highest_condition > W8_CONDITION_UNCONSCIOUS) {
+    /* Retail 0x004ef401 compares the condition unsigned (cmp 0x12 / jb), so a
+       condition >= 0x80000000 is not ready (found by the w8diff harness). */
+    if (static_cast<unsigned int>(character->highest_condition) >=
+        static_cast<unsigned int>(W8_CONDITION_DEAD)) {
         return false;
     }
     return character->experience >= character->experience_goal;
@@ -622,15 +631,21 @@ void CalcAttacks(W8Character* character)
         }
 
         if (character->dual_wielding) {
+            /* Retail 0x004ee4ef: (100 - level) is divided by 4 as signed (cdq/and 3/sar 2), so a
+               Dual Weapons level above 100 gives a small negative quotient, not a wrapped one. */
             dual_penalty =
-                -10 * (hand + 1) - (100 - character->skills[W8_SKILL_DUAL_WEAPONS].level) / 4;
+                -10 * static_cast<int>(hand + 1) -
+                (100 - static_cast<int>(character->skills[W8_SKILL_DUAL_WEAPONS].level)) / 4;
         } else {
             dual_penalty = 0;
         }
 
+        /* Retail 0x004ee50d: dex is halved unsigned (shr), then the sum is divided by 3 as a
+           signed int (imul 0x55555556), so a negative sum gives a score below 60. */
         attack->attack_score =
-            (dual_penalty + character->attributes[W8_ATTRIBUTE_DEXTERITY].effective / 2 +
-             attack->combined_skill * 2 + physical_experience) /
+            (dual_penalty +
+             static_cast<int>(character->attributes[W8_ATTRIBUTE_DEXTERITY].effective / 2) +
+             static_cast<int>(attack->combined_skill) * 2 + physical_experience) /
                 3 +
             60;
         if (character->fInParty && character->iRace == W8_RACE_ANDROID) {
@@ -642,10 +657,13 @@ void CalcAttacks(W8Character* character)
             }
         }
 
-        score = (((character->attributes[W8_ATTRIBUTE_SPEED].effective +
-                   character->attributes[W8_ATTRIBUTE_DEXTERITY].effective) >>
-                  1) +
-                 dual_penalty + physical_experience + load_penalty + attack->combined_skill) /
+        /* Retail 0x004ee58e: (dex + speed) is halved unsigned (shr), the rest of the sum and the
+           divide by 3 are signed (imul 0x55555556), so a negative sum gives 1 attack. */
+        score = (static_cast<int>((character->attributes[W8_ATTRIBUTE_SPEED].effective +
+                                   character->attributes[W8_ATTRIBUTE_DEXTERITY].effective) >>
+                                  1) +
+                 dual_penalty + physical_experience + load_penalty +
+                 static_cast<int>(attack->combined_skill)) /
                 3;
         attack->attacks = 1;
         if (hand == 0) {
@@ -660,9 +678,11 @@ void CalcAttacks(W8Character* character)
         }
 
         /* Retail reads damage_bonus here before it is reset below, so the swing score sees the
-           value left by the previous CalcAttacks pass (0x004ee5ef). */
-        score = (character->attributes[W8_ATTRIBUTE_SPEED].effective + attack->damage_bonus * 10 +
-                 dual_penalty + physical_experience + load_penalty + attack->combined_skill) /
+           value left by the previous CalcAttacks pass (0x004ee5ef). The divide by 3 is signed
+           (imul 0x55555556), so a negative sum gives 1 swing. */
+        score = (static_cast<int>(character->attributes[W8_ATTRIBUTE_SPEED].effective) +
+                 attack->damage_bonus * 10 + dual_penalty + physical_experience + load_penalty +
+                 static_cast<int>(attack->combined_skill)) /
                 3;
         attack->swings = 1;
         if (score > 66) {
@@ -679,9 +699,9 @@ void CalcAttacks(W8Character* character)
         attack->hit_bonus = 0;
         attack->attack_bonus = 0;
         attack->damage_percent = 0;
-        attack->damage_dice.base = 0;
-        attack->damage_dice.count = 0;
-        attack->damage_dice.sides = 0;
+        /* Retail 0x004ee65c clears only the four bonus fields; damage_dice is
+           written on the unarmed path below and otherwise keeps its old value
+           (found by the w8diff harness). */
         if (records[hand] != 0) {
             attack->damage_bonus += records[hand]->attack_damage_bonus;
             attack->hit_bonus += records[hand]->attack_hit_bonus;
@@ -819,7 +839,10 @@ void CalcArmorClasses(W8Character* character)
         }
     }
 
-    if (character->highest_condition <= W8_CONDITION_UNCONSCIOUS) {
+    /* Retail 0x004eea93 compares the condition unsigned (cmp 0x12 / jae), so a
+       condition >= 0x80000000 gets none of these terms (found by the w8diff harness). */
+    if (static_cast<unsigned int>(character->highest_condition) <
+        static_cast<unsigned int>(W8_CONDITION_DEAD)) {
         if (CharacterHasTrait(character, W8_TRAIT_FAERIE_BASE_ARMOR_CLASS)) {
             character->armor_class_components[W8_AC_COMPONENT_RACE] += 2;
         }
@@ -1221,7 +1244,10 @@ void AwardPartyExperience(int amount, int alternate_message)
         }
     }
     wchar_t* text = new wchar_t[0x200];
-    swprintf(text, gppStringList[alternate_message ? 0x231 : 0x232], amount);
+    /* Retail 0x004eefb9 tests only the low byte of the flag (mov bl,[esp+1Ch] /
+       test bl,bl) (found by the w8diff harness review). */
+    const bool alternate = static_cast<unsigned char>(alternate_message) != 0;
+    swprintf(text, gppStringList[alternate ? 0x231 : 0x232], amount);
     W8ExperienceNoticePayload* payload = new W8ExperienceNoticePayload;
     payload->amount = amount;
     payload->alternate_message = static_cast<unsigned char>(alternate_message);

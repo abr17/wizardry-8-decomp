@@ -143,10 +143,10 @@ static W8NpcNamedQuote g_npc_named_quotes[] = {
     {L"T'Rang", 0x40, 109},        {L"Higardi", 0x80, 106},        {L"Trynnie", 0x100, 107},
     {L"Rapax", 0x200, 114},        {L"Rynjin", 0x400, 114},        {L"Rattkin", 0x800, 107},
     {L"Dark Savant", 0x1000, 106}, {L"Marten", 0x2000, 112},
+    /* Retail ends the table with a sentinel row {L"", 0, -1} at 0x0061b718; the name[0]
+       scan in FindNpcNameOrPlaceQuote stops on it. */
+    {L"", 0, -1},
 };
-/* No full sentinel row exists in retail: the name[0] scan in
-   FindNpcNameOrPlaceQuote reads one row past the end, where the following
-   zero word happens to terminate the loop. */
 
 /* Region-by-level-band quote table: one 0x12-int row per
    g_npc_script_region_names region id; band 0 is unused. */
@@ -461,14 +461,15 @@ void UpdateNpcDialogueVoiceAndCursor(void)
             SetTargetCursor(1);
             return;
         }
-        if (g_npc_scripting.quote_active == 0) {
-            if (g_npc_scripting.message_lines.GetCount() < 1) {
-                if (gXStatus.iCurrentCursor != W8_CURSOR_TEXT_INPUT) {
-                    SetTargetCursor(W8_CURSOR_NONE);
-                    return;
-                }
+        /* Retail 0x00524E6E: the wait cursor shows while a quote is active OR
+           lines are still queued (count > 0, signed jg); only idle falls back. */
+        if (g_npc_scripting.quote_active == 0 && g_npc_scripting.message_lines.GetCount() < 1) {
+            if (gXStatus.iCurrentCursor != W8_CURSOR_TEXT_INPUT) {
+                SetTargetCursor(W8_CURSOR_NONE);
             }
-        } else if (!gXStatus.scripted_scene) {
+            return;
+        }
+        if (!gXStatus.scripted_scene) {
             SetTargetCursor(W8_CURSOR_MAP_LOAD);
         }
     }
@@ -523,7 +524,9 @@ void ProcessNpcScriptingFrame(void)
     }
     if (!g_npc_scripting.scripted_scene_active && g_npc_scripting.quote_active == 0 &&
         !g_npc_scripting.portrait_message_active) {
-        if (g_npc_interaction_state->script_busy < 1) {
+        /* Retail 0x00525014: cmp byte [state+0x1fa],0 / jg skip is signed, so
+           script_busy 0xff (-1, set for OPTIONS/KEYWORD_INPUT) still drains the queue. */
+        if (static_cast<signed char>(g_npc_interaction_state->script_busy) < 1) {
             ProcessMessageBoxQueue();
             if (g_npc_scripting.quote_active != 0) {
                 return;
@@ -560,6 +563,9 @@ void ProcessNpcScriptingFrame(void)
 // FUNCTION: WIZ8 0x00525110
 void BeginNpcScriptDialogue(W8NpcState* npc, unsigned char preserve_state)
 {
+    /* Retail 0x00525116: the pending staged-session restore is cancelled on
+       every call and re-armed only when preserving. */
+    g_npc_scripting.restore_staged_session = false;
     if (preserve_state != 0) {
         g_npc_scripting.restore_staged_session = true;
         g_staged_short = g_npc_scripting.staging_restore.staged_short;
@@ -2544,29 +2550,32 @@ bool IsSedexusCaptureActive(void)
     return g_npc_scripting.sedexus_capture_active;
 }
 /* Cycle-0x12 arrival callback: the henchmen group spawns on the NP_HENCHMEN
-   waypoint and its first member's bound NPC gets the script notice; the
-   callback monster itself is parked at the origin with its position flagged
-   dirty either way. */
+   waypoint and its first member's bound NPC gets the script notice; once the
+   waypoint is found the callback monster itself is parked at the origin with
+   its position flagged dirty, whether or not the spawn/NPC lookups succeed. */
 // FUNCTION: WIZ8 0x0052A080
 void NpcScriptHenchmanArrives(W8Monster* monster)
 {
     srVector3T<float> position;
     srVector3T<float> origin;
 
-    if (FindEntityByName("NP_HENCHMEN", &position, 0, 0)) {
-        PointCameraAtTarget(&position, false, true);
-        W8MonsterGroup* group = SpawnMonsters(0xdc, 1, &position, 2, true, false, false);
-        int location_id = IListGetAt(group->monsters, 0);
-        if (location_id != 0) {
-            W8MonsterInfo* monster_info =
-                MonsterGetScriptPartByLocationIndex(MonsterGetIndexByLocationID(
-                    0x111f, "C:\\Projects\\Wizardry 8\\Local Code\\NPC Scripting.cpp", location_id,
-                    true));
-            if (monster_info != 0) {
-                W8NpcState* npc = GetNpcStateForMonsterInfo(monster_info, false);
-                if (npc != 0) {
-                    QueueNpcScriptNotice(npc, 0, -1, false, 0);
-                }
+    /* Retail 0x0052A09B: je 0x52a14c returns at once when the waypoint is
+       missing, leaving the callback monster unparked. */
+    if (!FindEntityByName("NP_HENCHMEN", &position, 0, 0)) {
+        return;
+    }
+    PointCameraAtTarget(&position, false, true);
+    W8MonsterGroup* group = SpawnMonsters(0xdc, 1, &position, 2, true, false, false);
+    int location_id = IListGetAt(group->monsters, 0);
+    if (location_id != 0) {
+        W8MonsterInfo* monster_info =
+            MonsterGetScriptPartByLocationIndex(MonsterGetIndexByLocationID(
+                0x111f, "C:\\Projects\\Wizardry 8\\Local Code\\NPC Scripting.cpp", location_id,
+                true));
+        if (monster_info != 0) {
+            W8NpcState* npc = GetNpcStateForMonsterInfo(monster_info, false);
+            if (npc != 0) {
+                QueueNpcScriptNotice(npc, 0, -1, false, 0);
             }
         }
     }

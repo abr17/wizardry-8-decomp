@@ -123,7 +123,8 @@ void stLight::traverse(srNode::TraverseInfo& info)
             if (first_child_ != 0) {
                 first_child_->traverse(info);
             }
-        } else if (m_definition != 0) {
+        } else {
+            // Retail 0x0049C7A0 registers every enabled light; it never tests m_definition.
             if (!testFlag(FLAG_GLOBAL)) {
                 srNode::TraverseInfo::Entry& entry = info.entries[info.entry_count];
                 entry.node = this;

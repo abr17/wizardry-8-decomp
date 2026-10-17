@@ -198,7 +198,8 @@ void W8ProfRaceInfoDialogBase::ScrollCallback(W8DialogScrollBar* scroll_bar,
 // FUNCTION: WIZ8 0x005df0d0
 W8ProfessionInfoDialog::W8ProfessionInfoDialog(W8Profession uiIndex)
 {
-    if (uiIndex >= W8_PROFESSION_COUNT) {
+    /* Retail 0x005df0f7: unsigned test (cmp/jb), so a negative index also asserts. */
+    if (static_cast<unsigned int>(uiIndex) >= static_cast<unsigned int>(W8_PROFESSION_COUNT)) {
         srAssertFail("uiIndex < PROF_COUNT", PROF_RACE_INFO_DIALOG_CPP, 0x123, 0);
     }
     m_uiIndex = uiIndex;
@@ -279,7 +280,8 @@ bool W8ProfessionInfoDialog::PopulateText()
 // FUNCTION: WIZ8 0x005df570
 W8RaceInfoDialog::W8RaceInfoDialog(W8Race uiIndex)
 {
-    if (uiIndex >= W8_RACE_COUNT) {
+    /* Retail 0x005df597: unsigned test (cmp/jb), so a negative index also asserts. */
+    if (static_cast<unsigned int>(uiIndex) >= static_cast<unsigned int>(W8_RACE_COUNT)) {
         srAssertFail("uiIndex < RACE_COUNT", PROF_RACE_INFO_DIALOG_CPP, 0x199, 0);
     }
     m_uiIndex = uiIndex;
@@ -289,7 +291,8 @@ W8RaceInfoDialog::W8RaceInfoDialog(W8Race uiIndex)
     m_uiNameId = g_race_info_rows[uiIndex].name_id;
     m_uiDetailId = g_race_info_rows[uiIndex].detail_id;
     for (unsigned int attribute = 0; attribute < ATTR_COUNT; ++attribute) {
-        if (uiIndex < W8_RACE_PLAYABLE_COUNT) {
+        /* Retail 0x005df5fe: unsigned test (cmp/jae); negative index writes -1 instead of reading OOB. */
+        if (static_cast<unsigned int>(uiIndex) < static_cast<unsigned int>(W8_RACE_PLAYABLE_COUNT)) {
             m_minimums[attribute] = g_race_attribute_minimums[uiIndex].values[attribute];
         } else {
             m_minimums[attribute] = -1;

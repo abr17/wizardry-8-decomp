@@ -1,4 +1,5 @@
 #include "wiz8/engine_code/AnimRep.hpp"
+#include "wiz8/russian_text.h"
 #include "wiz8/monster_cycles.h"
 #include "wiz8/conditions.h"
 #include "wiz8/fonts.h"
@@ -187,8 +188,10 @@ bool CanMonsterProtect(W8MonsterInfo* monster_info)
 {
     const W8MonsterRecord* record = GetMonsterDataForInfo(monster_info);
 
+    /* Retail 0x00545bfa compares the condition unsigned (jae), so an
+       out-of-range value counts as disabled (found by the w8diff harness). */
     if (!monster_info->fActive || !monster_info->fInCombat || monster_info->hp_current == 0 ||
-        monster_info->highest_condition >= W8_CONDITION_BLIND ||
+        static_cast<unsigned int>(monster_info->highest_condition) >= W8_CONDITION_BLIND ||
         (record->flags & W8_MONSTER_FLAG_BODYGUARD) == 0) {
         return false;
     }
@@ -816,7 +819,9 @@ void ResolveSpellMissileHit(W8Missile* missile)
                 if (monster_info->fActive) {
                     MonsterGetLocation(monster_info->p3D, &location);
                     srVector3T<float> offset = center - location;
-                    if (offset.Length() <= definition->radius) {
+                    /* Retail 0x00544EDB..0x00544EE2: FCOMP + TEST AH,0x41 + JE skips only an
+                       ordered "greater"; written as !(a > b) so a NaN distance still applies. */
+                    if (!(offset.Length() > definition->radius)) {
                         struck.iMonsterID = monster_info->location_id;
                         ApplyEffectConditions(source, &struck, definition, announce, verbose, 0);
                     }
@@ -2692,7 +2697,9 @@ int GetMonsterAttackScore(W8MonsterInfo* monster_info, W8MonsterAttack* attack,
             score += 10;
         }
     }
-    int penalty = FatigueArmorPenalty(monster_info->fatigue_band);
+    /* Unsigned: retail 0x005427ae halves with shr, so an out-of-range band
+       (returned as is, e.g. -1) loses its sign bit (found by the w8diff harness). */
+    unsigned int penalty = FatigueArmorPenalty(monster_info->fatigue_band);
     for (unsigned int i = 0; i < 0x12; i = i + 1) {
         if (attack->ubWeaponNameIndex == g_low_fatigue_attack_verbs[i]) {
             penalty >>= 1;
@@ -2883,12 +2890,17 @@ void ApplyEffectConditions(W8TargetSource* source, W8CombatSlot* target,
                 ->highest_condition;
     }
     for (i = 0; i < 0x10; ++i) {
-        if (highest_condition > W8_CONDITION_UNCONSCIOUS) {
+        /* Retail 0x005433fa: unsigned jae DEAD. */
+        if (static_cast<unsigned int>(highest_condition) >= W8_CONDITION_DEAD) {
             break;
         }
         if (definition->condition_chances[i] != 0) {
             if (Random(100) < definition->condition_chances[i]) {
-                count_base = definition->power_level / 3 + 1;
+                /* Retail 0x0054342f divides unsigned (mul 0xaaaaaaab), so a
+                   negative power gives a huge dice count (found by the w8diff
+                   harness). */
+                count_base =
+                    static_cast<int>(static_cast<unsigned int>(definition->power_level) / 3 + 1);
                 magnitude = RollEffectDuration(definition);
                 if (magnitude < 2) {
                     SetDice(&definition->magnitude, count_base, 2, 1);
@@ -3188,14 +3200,16 @@ static void AppendCombatTargetEntry(W8PList* out_list, W8TargetKind kind, int iC
 // FUNCTION: WIZ8 0x00543dc0
 void BuildCharacterTargetList(int party_slot, int action, W8PList* out_list)
 {
+    /* Retail 0x00543E5F..0x00543E76: the exclusion reads the acting slot's own
+       out-of-combat target (row = party_slot * 0x106), not the candidate's. */
+    W8PartySlotRow* actor_row = &g_status.buffers.XChar[party_slot];
     for (int i = 0; i < 8; i = i + 1) {
-        W8PartySlotRow* row = &g_status.buffers.XChar[i];
         if (CanPartySlotParticipate(i)) {
             if (i == party_slot) {
                 AppendCombatTargetEntry(out_list, W8_TARGET_KIND_CHARACTER, i, -1);
             } else {
-                if ((row->target_out_of_combat.iType == W8_TARGET_KIND_CHARACTER &&
-                     row->target_out_of_combat.iChar == i) ||
+                if ((actor_row->target_out_of_combat.iType == W8_TARGET_KIND_CHARACTER &&
+                     actor_row->target_out_of_combat.iChar == i) ||
                     !CharacterActionReachesSlot(party_slot, action, i,
                                                 W8_TARGETING_CONTEXT_OUT_OF_COMBAT)) {
                     continue;
@@ -3274,7 +3288,8 @@ void AnnounceAccidentalStrike(W8TargetSource* source, W8CombatSlot* target)
         wchar_t* name = g_status.buffers.Char[source->iChar].name;
         highlight_start = 0;
         highlight_stop = static_cast<unsigned char>(wcslen(name));
-        swprintf(message, L"%s %s ", name, L"accidentally strikes");
+        swprintf(message, L"%s %s ", name,
+                 RussianOr(L"accidentally strikes", L"неожиданно бьет"));
         if (target->iType == W8_TARGET_KIND_CHARACTER) {
             if (source->iChar == target->iChar) {
                 W8Character* pc = &g_status.buffers.Char[source->iChar];
@@ -3295,7 +3310,7 @@ void AnnounceAccidentalStrike(W8TargetSource* source, W8CombatSlot* target)
             MonsterGetIndexByLocationID(0x12a9, COMBAT_ATTACK_CPP, source->iMonsterID, true));
         W8MonsterRecord* record = GetMonsterDataForInfo(monster_info);
         swprintf(message, L"%s %s ", GetMonsterName(monster_info, record, 0),
-                 L"accidentally strikes");
+                 RussianOr(L"accidentally strikes", L"неожиданно бьет"));
         color = GetTargetNoticeColor(source, target);
         highlight_start = static_cast<unsigned char>(wcslen(message));
         if (target->iType == W8_TARGET_KIND_MONSTER && source->iMonsterID == target->iMonsterID) {
@@ -3553,38 +3568,45 @@ void FireCharacterItemMissile(int party_slot, W8Character* pc, W8CombatCharacter
 void ScatterMissileAimPoint(const srVector3T<float>* from, srVector3T<float>* to, int accuracy,
                             bool blind)
 {
-    float dx = to->x - from->x;
-    float dy = to->y - from->y;
-    float dz = to->z - from->z;
-    float px = dy * -dx;
-    float py = dz * dz - dx * -dx;
-    float pz = -(dz * dy);
-    float sx = py * dz - pz * dy;
-    float sy = pz * dx - dz * px;
-    float sz = px * dy - py * dx;
+    /* Retail keeps the angle, the squared lengths, the scale factors, the
+       distance and the final x sum on the 53-bit x87 stack (double here) and
+       stores everything else as float; the term order below follows the retail
+       code at 0x005454c0 (found by the w8diff harness). The zero-length and
+       short-distance tests are also taken on NaN (fcom sets C3/C0). */
+    float dx = static_cast<float>(static_cast<double>(to->x) - from->x);
+    float dy = static_cast<float>(static_cast<double>(to->y) - from->y);
+    float dz = static_cast<float>(static_cast<double>(to->z) - from->z);
+    float px = static_cast<float>(static_cast<double>(dy) * -dx);
+    float dz_squared = static_cast<float>(static_cast<double>(dz) * dz);
+    float py = static_cast<float>(dz_squared - static_cast<double>(dx) * -dx);
+    float pz = static_cast<float>(-(static_cast<double>(dz) * dy));
+    float sx = static_cast<float>(static_cast<double>(py) * dz - static_cast<double>(pz) * dy);
+    float sy = static_cast<float>(static_cast<double>(pz) * dx - static_cast<double>(dz) * px);
+    float sz = static_cast<float>(static_cast<double>(px) * dy - static_cast<double>(py) * dx);
     double angle = static_cast<double>(Random(0x168));
-    float radians = static_cast<float>(3.141592653589793 * g_camera_view_factor0 * angle);
-    float mag = sx * sx + sz * sz + sy * sy;
-    if (mag != 0.0f) {
-        float scale = static_cast<float>(sin(radians));
-        scale = scale / static_cast<float>(sqrt(mag));
-        sx *= scale;
-        sy *= scale;
-        sz *= scale;
+    double radians = 3.141592653589793 * g_camera_view_factor0 * angle;
+    double mag = (static_cast<double>(sy) * sy + static_cast<double>(sz) * sz) +
+                 static_cast<double>(sx) * sx;
+    if (mag > 0.0) {
+        double scale = sin(radians) / sqrt(mag);
+        sx = static_cast<float>(sx * scale);
+        sy = static_cast<float>(sy * scale);
+        sz = static_cast<float>(sz * scale);
     }
-    mag = px * px + py * py + pz * pz;
-    if (mag != 0.0f) {
-        float scale = static_cast<float>(cos(radians));
-        scale = scale / static_cast<float>(sqrt(mag));
-        px *= scale;
-        py *= scale;
-        pz *= scale;
+    mag = (static_cast<double>(pz) * pz + static_cast<double>(py) * py) +
+          static_cast<double>(px) * px;
+    if (mag > 0.0) {
+        double scale = cos(radians) / sqrt(mag);
+        px = static_cast<float>(px * scale);
+        py = static_cast<float>(py * scale);
+        pz = static_cast<float>(pz * scale);
     }
-    sx = px + sx;
-    sy = py + sy;
-    sz = pz + sz;
-    float distance = static_cast<float>(sqrt(dy * dy + dx * dx + dz * dz));
-    if (distance < static_cast<float>(g_double_one)) {
+    sx = static_cast<float>(static_cast<double>(px) + sx);
+    sy = static_cast<float>(static_cast<double>(py) + sy);
+    sz = static_cast<float>(static_cast<double>(pz) + sz);
+    double distance =
+        sqrt((static_cast<double>(dx) * dx + static_cast<double>(dy) * dy) + dz_squared);
+    if (!(distance >= g_double_one)) {
         return;
     }
     double probability;
@@ -3609,7 +3631,7 @@ void ScatterMissileAimPoint(const srVector3T<float>* from, srVector3T<float>* to
         magnitude = raw_radius;
     } else {
         magnitude =
-            raw_radius + (probability - factor) * (300.0 - effective) * (1.0 / 300.0) * distance;
+            (300.0 - effective) * (1.0 / 300.0) * (probability - factor) * distance + raw_radius;
     }
     int roll = Random(100) + 1;
     int cap = effective;
@@ -3627,14 +3649,20 @@ void ScatterMissileAimPoint(const srVector3T<float>* from, srVector3T<float>* to
         }
         magnitude = (magnitude - raw_radius) * weight + raw_radius;
     }
-    mag = sx * sx + sz * sz + sy * sy;
-    if (mag != 0.0f) {
-        magnitude = magnitude / sqrt(mag);
-        sx = sx * static_cast<float>(magnitude);
-        sy = sy * static_cast<float>(magnitude);
-        sz = sz * static_cast<float>(magnitude);
+    mag = (static_cast<double>(sy) * sy + static_cast<double>(sz) * sz) +
+          static_cast<double>(sx) * sx;
+    if (mag > 0.0) {
+        double scale = magnitude / sqrt(mag);
+        sx = static_cast<float>(sx * scale);
+        sy = static_cast<float>(sy * scale);
+        sz = static_cast<float>(sz * scale);
     }
-    to->Set(dx + sx + from->x, dy + sy + from->y, sz + dz + from->z);
+    /* x stays on the stack between the two additions, y and z are stored first. */
+    float sum_y = static_cast<float>(static_cast<double>(dy) + sy);
+    float sum_z = static_cast<float>(static_cast<double>(sz) + dz);
+    to->Set(static_cast<float>((static_cast<double>(dx) + sx) + from->x),
+            static_cast<float>(static_cast<double>(sum_y) + from->y),
+            static_cast<float>(static_cast<double>(sum_z) + from->z));
 }
 
 /* Starts a party member's attack action: validates the hand's attack count and
@@ -3958,7 +3986,9 @@ int ResolveCharacterAttack(int party_slot)
                     fumble_chance += 5;
                 }
             }
-            fumbled = roll > 100 - fumble_chance;
+            /* Retail 0x0053E674..0x0053E67B: CMP + SETA is unsigned, so when the Android +5
+               pushes 100 - chance below zero the attack never fumbles. */
+            fumbled = static_cast<unsigned int>(roll) > static_cast<unsigned int>(100 - fumble_chance);
             CombatLog("TO HIT: Chance %d, Rolled %d (fumble %d%%)", to_hit, roll, fumble_chance);
             if (!guaranteed_hit && fumbled) {
                 if (!verbose) {

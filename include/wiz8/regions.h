@@ -61,10 +61,18 @@ struct W8Region {
     W8RegionCallback callback;
     unsigned short callback_id;
     bool help_enabled;
-    unsigned char unknown_13;
+    /* Wide canvas layout A (2026-10-11; retail padding byte 0x13): the
+       region's W8LayoutAnchor (wiz8/canvas.h). Bounds stay in 640 space; the
+       hit test subtracts the anchor's x shift from the cursor, and callbacks
+       receive the cursor in the region's own 640 space. 0 = centered. */
+    unsigned char layout_anchor;
     int help_text_id;
     Controls* owner;
 }; /* 0x1c */
+
+/* Layout A helpers (RegionManager.cpp). */
+void SetRegionLayoutAnchor(unsigned int region_index, int anchor);
+int GetRegionLayoutAnchor(unsigned int region_index);
 
 unsigned char InitializeRegionHelpState(void);
 

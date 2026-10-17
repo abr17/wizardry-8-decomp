@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/local_screens/MainGameScreen.h"
 #include "wiz8/layouts/game_status.h"
 #include "wiz8/local_code/MonsterManager.h"
@@ -407,7 +408,7 @@ void InitializeMainGameLevelBlock(void)
     g_level_block->combat_panel_timer = SetCountdownClock(0);
     g_level_block->refresh_party_panel = 1;
     g_level_block->text_scroll_drag_idle = 1;
-    SetTextBoxRegionBounds(0xa8, 0x16e, 0x1c4, 0x1ba);
+    SetMainTextBoxRegionBounds(); /* layout A: widened log */
     for (int line = 0; line < 12; ++line) {
         g_level_block->text_lines[line] = 0;
     }
@@ -436,5 +437,6 @@ void InitializeMainGameLevelBlock(void)
     g_level_block->radar_map_alternate = 0;
     g_level_block->review_transition_active = false;
     g_level_block->countdown5 = SetCountdownClock(0);
+    ReflowMessageStorage(); /* mod: old log lines - re-wrapped to the current window width */
     ResetMessageStorage();
 }

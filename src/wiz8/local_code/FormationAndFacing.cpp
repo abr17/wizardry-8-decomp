@@ -81,8 +81,12 @@ void ReconcilePartyFormation(W8PartyFormationState* edited, W8PartyFormationStat
         signed char row;
         bool row_changed;
 
+        /* Retail 0x00554654 / 0x0055474d / 0x0055475b compare the condition unsigned
+           (cmp 0xd and 0x12 / jae, jb), so a condition >= 0x80000000 counts as dead
+           (found by the w8diff harness). */
         if (!g_status.buffers.XChar[slot].fOccupied || character->hp_current <= 0 ||
-            character->highest_condition >= W8_CONDITION_TURNCOAT) {
+            static_cast<unsigned int>(character->highest_condition) >=
+                static_cast<unsigned int>(W8_CONDITION_TURNCOAT)) {
             continue;
         }
         row = edited->positions[slot].bQuadrant;
@@ -105,11 +109,16 @@ void ReconcilePartyFormation(W8PartyFormationState* edited, W8PartyFormationStat
         W8PartyFormationPosition* edited_position = &edited->positions[slot];
 
         if (!g_status.buffers.XChar[slot].fOccupied ||
-            (character->hp_current > 0 && character->highest_condition < W8_CONDITION_TURNCOAT)) {
+            (character->hp_current > 0 &&
+             static_cast<unsigned int>(character->highest_condition) <
+                 static_cast<unsigned int>(W8_CONDITION_TURNCOAT))) {
             continue;
         }
-        if (character->highest_condition >= W8_CONDITION_DEAD) {
-            *edited_position = *live_position;
+        if (static_cast<unsigned int>(character->highest_condition) >=
+            static_cast<unsigned int>(W8_CONDITION_DEAD)) {
+            /* Retail 0x00554935: the live record goes into `working`, which is what gets
+               written back to both formations, so the dead keep bOldQuadrant. */
+            working.positions[slot] = *live_position;
             continue;
         }
         if (edited_position->bQuadrant != live_position->bQuadrant) {
@@ -215,7 +224,11 @@ bool CanHoldFormationPlace(int party_slot)
 {
     const W8Character* character = &g_status.buffers.Char[party_slot];
 
-    return character->hp_current > 0 && character->highest_condition < W8_CONDITION_TURNCOAT;
+    /* Retail 0x00554a06 compares the condition unsigned (cmp 0xd / jae), so a
+       condition >= 0x80000000 cannot hold a place (found by the w8diff harness). */
+    return character->hp_current > 0 &&
+           static_cast<unsigned int>(character->highest_condition) <
+               static_cast<unsigned int>(W8_CONDITION_TURNCOAT);
 }
 
 /* Remember the formation combat started with. */
@@ -447,7 +460,10 @@ bool IsPartyLookingAt(W8MonsterInfo* monster_info, srVector3T<float> point)
     srVector3T<float> monster_position = monster_info->p3D->GetPosition();
     float bearing = NormalizeAngle(GetHeadingAngle(&monster_position, &point));
 
-    return fabsf(bearing - monster_info->p3D->GetYaw()) <= g_facing_tolerance0;
+    float difference = fabsf(bearing - monster_info->p3D->GetYaw());
+    /* Retail 0x00555bf6: fcomp; test ah,0x41 - only "greater and ordered" answers no,
+       so written as !(a > b) to let a NaN difference count as facing, like retail. */
+    return !(difference > g_facing_tolerance0);
 }
 
 /* The five formation rows' display names, indexed by row. */
@@ -630,7 +646,10 @@ void UpdateFormationSlotState(W8PartyFormationState* formation, int slot)
     signed char seat;
     int index;
 
-    if (g_status.buffers.Char[slot].highest_condition >= W8_CONDITION_DEAD) {
+    /* Retail 0x00554e98 compares the condition unsigned (cmp 0x12 / jb), so a
+       condition >= 0x80000000 counts as dead (found by the w8diff harness). */
+    if (static_cast<unsigned int>(g_status.buffers.Char[slot].highest_condition) >=
+        static_cast<unsigned int>(W8_CONDITION_DEAD)) {
         if (position->bQuadrant == -1) {
             return;
         }
@@ -641,8 +660,11 @@ void UpdateFormationSlotState(W8PartyFormationState* formation, int slot)
     if (position->bQuadrant != -1) {
         return;
     }
-    row = position->bOldQuadrant;
-    if (row != -1) {
+    if (position->bOldQuadrant != -1) {
+        /* Retail 0x00554ee6 indexes the occupant tables with the remembered quadrant
+           as an unsigned byte (and eax,0xff), so a corrupt -3 reads row 0xfd, not
+           row -3 (found by the w8diff harness). */
+        row = static_cast<unsigned char>(position->bOldQuadrant);
         seat = MakeRoomInFormationRow(formation, row);
         if (seat != -1) {
             SetFormationPosition(formation, slot, position->bOldQuadrant, seat,
@@ -672,13 +694,17 @@ void UpdateFormationSlotState(W8PartyFormationState* formation, int slot)
 // FUNCTION: WIZ8 0x00555080
 void SeatFormationSlotInRow(W8PartyFormationState* formation, int slot, int row)
 {
-    signed char seat = MakeRoomInFormationRow(formation, row);
+    /* Retail 0x0055508d indexes the occupant tables and the row names with the low
+       byte of the row (and esi,0xff); SetFormationPosition takes the low byte too
+       (found by the w8diff harness). */
+    unsigned char row_index = static_cast<unsigned char>(row);
+    signed char seat = MakeRoomInFormationRow(formation, row_index);
 
     if (seat != -1) {
         SetFormationPosition(formation, slot, row, seat, false, true, true);
         return;
     }
-    PostCharacterNotice(slot, gppStringList[0x24e], &g_formation_row_names[row][0]);
+    PostCharacterNotice(slot, gppStringList[0x24e], &g_formation_row_names[row_index][0]);
 }
 
 /* Swap two party slots' formation positions: the second takes the first's
@@ -709,7 +735,10 @@ void SwapFormationSlots(W8PartyFormationState* formation, int slot_a, int slot_b
         return;
     }
     {
-        int row = position_b->bOldQuadrant;
+        /* Retail 0x0055521c indexes the occupant tables and the row names with the
+           remembered quadrant as an unsigned byte (and ebx,0xff) (found by the w8diff
+           harness). */
+        int row = static_cast<unsigned char>(position_b->bOldQuadrant);
         signed char seat;
 
         seat = MakeRoomInFormationRow(formation, row);
@@ -763,7 +792,9 @@ int IsMonsterLookingAwayFrom(W8MonsterInfo* first, W8MonsterInfo* second)
     float bearing = NormalizeAngle(GetHeadingAngle(&second_position, &first_position));
     float facing = second->p3D->GetYaw();
 
-    if (static_cast<float>(g_facing_tolerance1) <= ShortestAngleDistance(bearing, facing)) {
+    /* Retail 0x00555e44 compares the distance with the double tolerance (fcomp qword),
+       not with it rounded to float (found by the w8diff harness). */
+    if (ShortestAngleDistance(bearing, facing) >= g_facing_tolerance1) {
         return 1;
     }
     return 0;

@@ -922,6 +922,8 @@ unsigned char CampSkillListRegionHandler(const InputAtom* event, W8Region* regio
     PushButtonSoundScheme(0, true);
     if (event->usEvent == RIGHT_BUTTON_DOWN) {
         region->flags |= W8_REGION_RIGHT_BUTTON_HELD;
+        /* Retail 0x005c643a: or flags,0x80 then return 1; the dialog opens only on RIGHT_BUTTON_UP. */
+        return 1;
     } else if (event->usEvent != RIGHT_BUTTON_UP) {
         if (event->usEvent != MOUSE_POS) {
             return 0;

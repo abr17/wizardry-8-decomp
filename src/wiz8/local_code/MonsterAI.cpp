@@ -290,7 +290,10 @@ W8SightState GetMonsterGroupPartySightState(W8MonsterGroup* monster_group)
         location_id = IListGetAt(monster_group->monsters, index);
         monster_info = MonsterInfoFromID(0xfe, MONSTER_AI_CPP, location_id, true);
         if (monster_info->fActive && !monster_info->p3D->IsDying() &&
-            monster_info->hp_current != 0 && monster_info->highest_condition < W8_CONDITION_BLIND) {
+            monster_info->hp_current != 0 &&
+            /* Retail 0x00530517: cmp [esi+0x107],0xc / jae - unsigned (found by the
+               w8diff harness review of this file's condition tests). */
+            static_cast<unsigned int>(monster_info->highest_condition) < W8_CONDITION_BLIND) {
             if (monster_info->player_visibility.sight_state == W8_SIGHT_SEEN) {
                 return W8_SIGHT_SEEN;
             }
@@ -358,7 +361,9 @@ void DoMonsterRTAI(W8MonsterInfo* monster_info, bool engage)
     if (monster_info->fInCombat) {
         return;
     }
-    if (monster_info->hp_current != 0 && monster_info->highest_condition < W8_CONDITION_WEBBED) {
+    /* Retail 0x0053068f: cmp [esi+0x107],0xe / jae - unsigned. */
+    if (monster_info->hp_current != 0 &&
+        static_cast<unsigned int>(monster_info->highest_condition) < W8_CONDITION_WEBBED) {
         if (monster_info->control_state == W8_MONSTER_CONTROL_LURED) {
             decision = W8_RT_AI_FOLLOW_LURE;
         } else {
@@ -822,11 +827,12 @@ void UpdateMonsterAI(W8MonsterInfo* monster_info)
     unsigned char rating;
     unsigned int spell;
     W8CombatSlot chosen;
-    float hp_ratio;
     bool backs_off;
     srVector3T<float> position;
 
-    if (monster_info->highest_condition >= W8_CONDITION_ASLEEP) {
+    /* Retail 0x00531548: cmp [esi+0x107],0xf / jae - unsigned, so a negative
+       condition stands the monster down too (found by the w8diff harness). */
+    if (static_cast<unsigned int>(monster_info->highest_condition) >= W8_CONDITION_ASLEEP) {
         monster_info->action_kind = W8_MONSTER_ACTION_NONE;
         monster_info->pCombat->phase = 0;
         monster_info->pCombat->active = true;
@@ -857,8 +863,13 @@ void UpdateMonsterAI(W8MonsterInfo* monster_info)
         (monster_info->uiCondition[W8_CONDITION_BLIND] == 0 || record->kind == 0xc) &&
         MonsterChooseTarget(monster_info, &chosen, 2) > CalcRangeDistance(range_category)) {
         record = GetMonsterDataForInfo(monster_info);
-        hp_ratio = monster_info->hp_current / static_cast<float>(monster_info->uiHPMax);
-        backs_off = hp_ratio <= 0.95f && record->prefer_ranged_actions == 0;
+        /* Retail 0x0053164B: fild hp (unsigned) / fidiv max (signed) stays unrounded on
+           the x87 stack and is fcomp'd against 0.95f; "test ah,0x41; jne" also takes NaN,
+           hence !(>). */
+        backs_off = !(static_cast<double>(monster_info->hp_current) /
+                          static_cast<double>(monster_info->uiHPMax) >
+                      static_cast<double>(0.95f)) &&
+                    record->prefer_ranged_actions == 0;
         monster_info->action_kind =
             backs_off ? W8_MONSTER_ACTION_BACK_OFF : W8_MONSTER_ACTION_APPROACH;
     } else {
@@ -919,8 +930,12 @@ void UpdateMonsterAI(W8MonsterInfo* monster_info)
                     monster_info->action_kind = W8_MONSTER_ACTION_RETURN_TO_START;
                 } else {
                     record = GetMonsterDataForInfo(monster_info);
-                    hp_ratio = monster_info->hp_current / static_cast<float>(monster_info->uiHPMax);
-                    backs_off = hp_ratio <= 0.95f && record->prefer_ranged_actions == 0;
+                    /* Retail 0x00531892: same unrounded fild/fidiv quotient, then jumps to the
+                       0x0053165E fcomp 0.95f; NaN also backs off, hence !(>). */
+                    backs_off = !(static_cast<double>(monster_info->hp_current) /
+                                      static_cast<double>(monster_info->uiHPMax) >
+                                  static_cast<double>(0.95f)) &&
+                                record->prefer_ranged_actions == 0;
                     monster_info->action_kind =
                         backs_off ? W8_MONSTER_ACTION_BACK_OFF : W8_MONSTER_ACTION_APPROACH;
                 }
@@ -964,8 +979,9 @@ bool MonsterGroupCanEngage(W8MonsterGroup* monster_group)
     if (monster_group->ubDisposition == W8_DISPOSITION_HOSTILE) {
         for (index = 0; index < ILLength(monster_group->monsters); ++index) {
             member = GetGroupMemberInfo(monster_group, index);
+            /* Retail 0x005319c2: cmp [eax+0x107],edi(0x12) / jae - unsigned. */
             if (member->fActive && member->hp_current != 0 &&
-                member->highest_condition < W8_CONDITION_DEAD &&
+                static_cast<unsigned int>(member->highest_condition) < W8_CONDITION_DEAD &&
                 MonsterHasVisibleTarget(member, true, W8_VISIBLE_TARGET_HOSTILE, true)) {
                 goto members;
             }
@@ -977,8 +993,10 @@ members:
         member = MonsterGetScriptPartByLocationIndex(MonsterGetIndexByLocationID(
             0x4a7, MONSTER_AI_CPP, IListGetAt(monster_group->monsters, index), true));
         record = GetMonsterDataForInfo(member);
+        /* Retail 0x00531a71: cmp [esi+0x107],0xc / jae - unsigned. */
         if (!member->fActive || member->fMotionless || member->p3D->IsDying() ||
-            member->hp_current == 0 || member->highest_condition >= W8_CONDITION_BLIND) {
+            member->hp_current == 0 ||
+            static_cast<unsigned int>(member->highest_condition) >= W8_CONDITION_BLIND) {
             continue;
         }
         if (RateMonsterBestAttack(member, record, false) == 0) {
@@ -1894,8 +1912,11 @@ void CollectMonsterSpellTargets(W8MonsterInfo* monster_info, int spell_id,
     case W8_TARGET_TYPE_ALLY:
         for (index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
             member = MonsterGetScriptPartByLocationIndex(index);
+            /* Retail 0x005334a6/0x005337a6/0x00533ce8: cmp [esi+0x107],0x12 / jae -
+               unsigned in all three target-type scans. */
             if (member->fActive && member->hp_current != 0 &&
-                member->highest_condition < W8_CONDITION_DEAD && member->fInCombat &&
+                static_cast<unsigned int>(member->highest_condition) < W8_CONDITION_DEAD &&
+                member->fInCombat &&
                 MonsterHostility(monster_info, member) == W8_DISPOSITION_FRIENDLY &&
                 MonsterAttackReachesMonster(monster_info, record, 0, member)) {
                 ResetCombatSlot(&slot);
@@ -1925,7 +1946,8 @@ void CollectMonsterSpellTargets(W8MonsterInfo* monster_info, int spell_id,
         for (index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
             member = MonsterGetScriptPartByLocationIndex(index);
             if (member != monster_info && member->fActive && member->hp_current != 0 &&
-                member->highest_condition < W8_CONDITION_DEAD && member->fInCombat &&
+                static_cast<unsigned int>(member->highest_condition) < W8_CONDITION_DEAD &&
+                member->fInCombat &&
                 MonsterHostility(monster_info, member) == W8_DISPOSITION_HOSTILE &&
                 MonsterAttackReachesMonster(monster_info, record, 0, member)) {
                 ResetCombatSlot(&slot);
@@ -1981,7 +2003,8 @@ void CollectMonsterSpellTargets(W8MonsterInfo* monster_info, int spell_id,
         for (index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
             member = MonsterGetScriptPartByLocationIndex(index);
             if (member != monster_info && member->fActive && member->hp_current != 0 &&
-                member->highest_condition < W8_CONDITION_DEAD && member->fInCombat &&
+                static_cast<unsigned int>(member->highest_condition) < W8_CONDITION_DEAD &&
+                member->fInCombat &&
                 MonsterHostility(monster_info, member) == W8_DISPOSITION_HOSTILE &&
                 MonsterAttackReachesMonster(monster_info, record, 0, member)) {
                 ResetCombatSlot(&slot);
@@ -2095,8 +2118,9 @@ void CheckMonsterGroupsLeaveCombat(void)
         for (index = 0; index < ILLength(group->monsters); ++index) {
             member = MonsterGetScriptPartByLocationIndex(MonsterGetIndexByLocationID(
                 0xc0b, MONSTER_AI_CPP, IListGetAt(group->monsters, index), true));
+            /* Retail 0x005343e9/0x005345d3: cmp [eax+0x107],0x12 / jae - unsigned. */
             if (!member->fActive || member->hp_current == 0 ||
-                member->highest_condition >= W8_CONDITION_DEAD ||
+                static_cast<unsigned int>(member->highest_condition) >= W8_CONDITION_DEAD ||
                 MonsterHasNoVisibleEnemy(member, false)) {
                 continue;
             }
@@ -2124,7 +2148,7 @@ void CheckMonsterGroupsLeaveCombat(void)
                 other = MonsterGetScriptPartByLocationIndex(MonsterGetIndexByLocationID(
                     0xc0b, MONSTER_AI_CPP, IListGetAt(group->monsters, member_index), true));
                 if (other->fActive && other->hp_current != 0 &&
-                    other->highest_condition < W8_CONDITION_DEAD &&
+                    static_cast<unsigned int>(other->highest_condition) < W8_CONDITION_DEAD &&
                     !MonsterHasNoVisibleEnemy(other, true)) {
                     ++engaged;
                     break;
@@ -2171,8 +2195,10 @@ bool MonsterHasNoVisibleEnemy(W8MonsterInfo* monster_info, bool party_only)
     if (!party_only) {
         for (index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
             other = MonsterGetScriptPartByLocationIndex(index);
+            /* Retail 0x00534741: cmp [esi+0x107],0x12 / jae - unsigned. */
             if (other != monster_info && other->fActive && other->hp_current != 0 &&
-                other->highest_condition < W8_CONDITION_DEAD && other->fInCombat &&
+                static_cast<unsigned int>(other->highest_condition) < W8_CONDITION_DEAD &&
+                other->fInCombat &&
                 MonsterHostility(monster_info, other) == W8_DISPOSITION_HOSTILE &&
                 (record = FindMonToMonVisibility(monster_info, other)) != 0 &&
                 record->sight_state != W8_SIGHT_UNSEEN) {
@@ -2197,8 +2223,10 @@ bool MonsterGroupHasVisibleTarget(W8MonsterGroup* monster_group, bool party_only
     }
     for (index = 0; index < ILLength(monster_group->monsters); ++index) {
         member = GetGroupMemberInfo(monster_group, index);
+        /* Retail 0x00534812: cmp [eax+0x107],0x12 / jae - unsigned, a negative
+           condition is skipped like a dead one (found by the w8diff harness). */
         if (member->fActive && member->hp_current > 0 &&
-            member->highest_condition < W8_CONDITION_DEAD &&
+            static_cast<unsigned int>(member->highest_condition) < W8_CONDITION_DEAD &&
             MonsterHasVisibleTarget(member, party_only, hostility, within_reach)) {
             return true;
         }
@@ -2228,9 +2256,11 @@ bool MonsterHasVisibleTarget(W8MonsterInfo* monster_info, bool party_only,
             reach = GetMonsterEngagementRange() + g_monster_engagement_range_floor;
         }
     }
+    /* Retail 0x005348EB: "test ah,0x41; je skip" rejects only when strictly greater,
+       so an unordered (NaN) compare counts as within reach, hence !(>). */
     if (monster_info->player_visibility.sight_state == W8_SIGHT_SEEN &&
         monster_info->player_visibility.los_flags[2] &&
-        (!within_reach || monster_info->p3D->GetDistanceToPlayer() <= reach)) {
+        (!within_reach || !(monster_info->p3D->GetDistanceToPlayer() > reach))) {
         for (index = 0; index < W8_PARTY_SLOT_COUNT; ++index) {
             if (CanPartySlotParticipate(index)) {
                 disposition = MonsterVsCharDisposition(index, monster_info);
@@ -2250,8 +2280,10 @@ bool MonsterHasVisibleTarget(W8MonsterInfo* monster_info, bool party_only,
     if (!party_only) {
         for (index = 0; index < PLLength(gXStatus.plsMonsterList); ++index) {
             other = MonsterGetScriptPartByLocationIndex(index);
+            /* Retail 0x005349a4: cmp [esi+0x107],0x12 / jae - unsigned. */
             if (other != monster_info && other->fActive && other->hp_current != 0 &&
-                other->highest_condition < W8_CONDITION_DEAD && other->fInCombat) {
+                static_cast<unsigned int>(other->highest_condition) < W8_CONDITION_DEAD &&
+                other->fInCombat) {
                 disposition = MonsterHostility(monster_info, other);
                 if (hostility == W8_VISIBLE_TARGET_ANY || disposition == hostility ||
                     (hostility == W8_VISIBLE_TARGET_NON_NEUTRAL &&
@@ -2259,8 +2291,10 @@ bool MonsterHasVisibleTarget(W8MonsterInfo* monster_info, bool party_only,
                     record = FindMonToMonVisibility(monster_info, other);
                     if (record != 0 && record->sight_state == W8_SIGHT_SEEN &&
                         record->los_flags[2]) {
+                        /* Retail 0x00534A09: "test ah,0x41; jne accept" also takes NaN,
+                           hence !(>). */
                         if (!within_reach ||
-                            monster_info->p3D->GetDistanceToMonster(other->p3D) <= reach) {
+                            !(monster_info->p3D->GetDistanceToMonster(other->p3D) > reach)) {
                             return true;
                         }
                     }
@@ -2459,8 +2493,10 @@ bool MonsterGroupHalfSpellTargetsValid(W8MonsterInfo* monster_info, int spell_id
         int location_id = IListGetAt(target_group->monsters, index);
         member = MonsterGetScriptPartByLocationIndex(
             MonsterGetIndexByLocationID(0xdc9, MONSTER_AI_CPP, location_id, true));
+        /* Retail 0x00534e4f: cmp [eax+0x107],0x12 / jae - unsigned. */
         if (member->fActive && member->hp_current != 0 &&
-            member->highest_condition < W8_CONDITION_DEAD && member->fInCombat &&
+            static_cast<unsigned int>(member->highest_condition) < W8_CONDITION_DEAD &&
+            member->fInCombat &&
             MonsterHostility(monster_info, member) == W8_DISPOSITION_HOSTILE) {
             ++eligible;
             ResetCombatSlot(&slot);
@@ -2704,8 +2740,9 @@ bool ShouldMonsterGroupEnterCombat(W8MonsterGroup* monster_group)
     } else {
         for (index = 0; index < ILLength(monster_group->monsters); ++index) {
             member = GetGroupMemberInfo(monster_group, index);
+            /* Retail 0x005356ab: cmp [eax+0x107],0x12 / jae - unsigned. */
             if (member->fActive && member->hp_current != 0 &&
-                member->highest_condition < W8_CONDITION_DEAD &&
+                static_cast<unsigned int>(member->highest_condition) < W8_CONDITION_DEAD &&
                 MonsterHasVisibleTarget(member, false, W8_VISIBLE_TARGET_NON_NEUTRAL, true)) {
                 reach = CalcRangeDistance(GetMonsterBestRangeCategory(leader, true, &sight)) +
                         GetMonsterCombatMoveRange(leader) * g_float_one_thousand;
@@ -2714,9 +2751,12 @@ bool ShouldMonsterGroupEnterCombat(W8MonsterGroup* monster_group)
                     reach = minimum;
                 }
                 party = g_startup_world->GetPosition();
-                if ((leader->p3D->movement.position - party).Length() <= reach &&
+                /* Retail 0x0053581A/0x0053584A: "test ah,0x41; je fail" fails only when strictly
+                   greater, so NaN continues, hence !(>). Retail 0x004534A9 already returns 0 for
+                   a NaN path distance, which the path_distance == path_distance test mirrors. */
+                if (!((leader->p3D->movement.position - party).Length() > reach) &&
                     leader->p3D->FindNavigatorPathDistance(750.0f, &path_distance) &&
-                    path_distance <= reach) {
+                    path_distance == path_distance && !(path_distance > reach)) {
                     return true;
                 }
                 break;

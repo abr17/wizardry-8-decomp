@@ -1,3 +1,4 @@
+#include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/local_screens/MGSRadarMap.h"
 
 #include <math.h>
@@ -122,6 +123,9 @@ void EnableRadarMap(bool enable)
 // FUNCTION: WIZ8 0x005a2140
 void EnsureRadarMapOverlay(void)
 {
+    /* Wide canvas layout A: the radar lives at the left canvas edge; the
+       backdrop is copied from there and its sprite placed there. */
+    CanvasDrawScope layout_scope(W8_ANCHOR_LEFT);
     if (g_radar_backdrop == 0) {
         W8ControlsRect bounds;
 
@@ -214,6 +218,7 @@ void RefreshRadarMap(void)
     if (!g_radar_map_enabled) {
         return;
     }
+    CanvasDrawScope layout_scope(W8_ANCHOR_LEFT); /* layout A: radar sprites at the left edge */
     ReleaseRadarMap();
 
     unsigned int map_surface;
@@ -432,6 +437,7 @@ void UpdateRadarBlips(void)
 // FUNCTION: WIZ8 0x005a3060
 static unsigned char PlaceRadarBlip(srVector3T<float>* delta, int group, bool lit)
 {
+    CanvasDrawScope layout_scope(W8_ANCHOR_LEFT); /* layout A: blips over the left radar */
     int ring = 0;
     srMatrix3T<float> rotation;
     int left;

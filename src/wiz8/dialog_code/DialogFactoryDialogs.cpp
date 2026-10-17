@@ -1,4 +1,5 @@
 #include "wiz8/dialog_code/DialogFactoryDialogs.h"
+#include "wiz8/russian_text.h"
 #include "wiz8/sgp_text.h"
 #include "wiz8/dialog_code/ButtonUserData.h"
 #include "wiz8/dialog_code/DialogButton.h"
@@ -406,9 +407,11 @@ void W8ListBoxDialog::Draw()
         SetButtonPosition(m_up_button, m_x + dx + 4 + width, m_y + 4 + dy);
         SetButtonPosition(m_down_button, m_x + dx + 4 + width,
                           m_y + dy + height - GetButtonHeight(m_down_button) - 4);
+        /* Port fix (2026-10-12): the slider is offset by the height of the
+           up arrow, as in the original, not by the height of the whole field. */
         SetButtonPosition(
             m_slider_button, m_x + dx + 4 + width,
-            GetButtonHeight(m_area_button) +
+            GetButtonHeight(m_up_button) +
                 ((height - GetButtonHeight(m_up_button) - GetButtonHeight(m_down_button) - 7) *
                  m_selected_line) /
                     m_lines.GetCount() +
@@ -1619,7 +1622,7 @@ void W8TriggerItemPickerDialog::Draw()
         }
         unsigned short weight = g_item_records[item->iItemNo].weight;
         gprintf(button->GetX() + 0x3c, button->GetY() + GetFontHeight(g_wiz_text_font) + 6,
-                L"%4.1f lbs", weight * 0.1f);
+                Wiz8ToSgpWideText(RussianOr(L"%4.1f lbs", L"%4.1f кг.")), weight * 0.1f);
     }
 }
 

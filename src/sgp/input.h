@@ -90,6 +90,9 @@ BOOLEAN IsPunctuationWideChar(UINT16 character);
 INT32 ToUppercaseWideChar(INT32 character);
 INT32 ToLowercaseWideChar(INT32 character);
 INT32 CompareWideTextIgnoreAsciiCase(const wchar_t* first, const wchar_t* second);
+/* Compare at most count characters, case-insensitive (Cyrillic too when
+   gfCyrillicText is set). Retail 0x004028c0. */
+INT32 CompareWideTextNIgnoreCase(const wchar_t* first, const wchar_t* second, UINT32 count);
 
 extern BOOLEAN InitializeInputManager(void);
 extern void ShutdownInputManager(void);

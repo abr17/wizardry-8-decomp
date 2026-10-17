@@ -198,6 +198,9 @@ void ShowButton(INT32 iButton);
 void RenderButtons(void);
 BOOLEAN DrawButton(INT32 iButtonID);
 void DrawButtonFromPtr(GUI_BUTTON* b);
+/* Wide canvas layout A: W8LayoutAnchor of a button (see wiz8/canvas.h). */
+void SetButtonLayoutAnchor(INT32 iButtonID, INT32 iAnchor);
+INT32 GetButtonLayoutAnchor(INT32 iButtonID);
 
 //Base button types
 void DrawGenericButton(GUI_BUTTON* b);

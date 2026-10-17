@@ -299,7 +299,10 @@ void W8Item::UpdateAnimation()
             }
         } else {
             rep->pulse_level -= 0.05f;
-            if (rep->pulse_level <= 0.25f) {
+            /* Retail 0x0049f8c6: fcomp 0.25 / test ah,0x41 / je - taken for <= and for
+               an unordered (NaN) compare, so a NaN level snaps back to 0.25 (found by
+               the w8diff harness). */
+            if (!(rep->pulse_level > 0.25f)) {
                 rep->pulse_level = 0.25f;
                 rep->flags |= W8_ITEM_ENTITY_PULSE_INCREASING;
             }

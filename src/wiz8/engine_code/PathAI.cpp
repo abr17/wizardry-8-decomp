@@ -104,7 +104,9 @@ bool LoadPathAI(W8PathAI** output, int handle)
             FileRead(handle, &axis.y, 4, 0);
             FileRead(handle, &axis.z, 4, 0);
             rotation.SetIdentity();
-            if (angle != g_double_zero) {
+            /* Retail 0x004a95a2: fcom 0.0; test ah,0x40; jne skip -> rotation skipped on equal OR
+               unordered (NaN); written as < || > so NaN keeps the identity like retail. */
+            if (angle < g_double_zero || angle > g_double_zero) {
                 rotation.RotateAroundAxis(sin(angle), cos(angle), axis);
             }
             path->rotations[index] = rotation;
@@ -414,7 +416,8 @@ void PathAISetValue(W8PathAI* path, float value)
         path->interpolation_fraction = 0;
         path->distance_travelled = 0;
         path->point_index = 0;
-        if (path->total_length <= 0.0f) {
+        /* Retail 0x004a9f90: test ah,0x41; je advance -> only ordered > 0 advances; NaN sets position. */
+        if (!(path->total_length > 0.0f)) {
             path->position = value;
             return;
         }
@@ -437,7 +440,8 @@ void PathAIAdvanceByDistance(W8PathAI* path, float distance)
     float remaining;
     float segment;
 
-    if (path->total_length <= g_float_zero) {
+    /* Retail 0x004a9fe9: test ah,0x41; jne return -> returns on <= 0 and on NaN (unordered). */
+    if (!(path->total_length > g_float_zero)) {
         return;
     }
     path->distance_travelled += distance;

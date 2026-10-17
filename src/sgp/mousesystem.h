@@ -36,6 +36,10 @@ typedef void (*MOUSE_HELPTEXT_DONE_CALLBACK)(); // the help is done callback
 typedef struct _MOUSE_REGION {
     UINT16 IDNumber;      // Region's ID number, set by mouse system
     INT8 PriorityLevel;   // Region's Priority, set by system and/or caller
+    /* Wide canvas layout A (2026-10-11): W8LayoutAnchor of the region (0 =
+       centered, set explicitly by MSYS_DefineRegion - there is no memset). Lives in the
+       former padding byte, so the struct size is unchanged. */
+    INT8 bLayoutAnchor;
     UINT32 uiFlags;       // Region's state flags
     INT16 RegionTopLeftX; // Screen area affected by this region (absolute coordinates)
     INT16 RegionTopLeftY;

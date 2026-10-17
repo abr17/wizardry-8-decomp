@@ -126,15 +126,19 @@ unsigned char EvaluateFact(W8FactId fact_id)
             return CountLeadingPartySlots() == 2;
         case W8_FACT_MOOK_MOOK_IN_PARTY: {
             unsigned int slot = 0;
+            /* Retail 0x0050826b: cmp [ecx],0xf / jb - the condition test is unsigned, a
+               negative condition does not count (found by the w8diff harness). */
             while (!g_status.buffers.XChar[slot].fOccupied ||
                    g_status.buffers.Char[slot].iRace != W8_RACE_MOOK ||
-                   g_status.buffers.Char[slot].highest_condition > W8_CONDITION_WEBBED) {
+                   static_cast<unsigned int>(g_status.buffers.Char[slot].highest_condition) >
+                       W8_CONDITION_WEBBED) {
                 if (slot >= 7) {
                     return 0;
                 }
                 ++slot;
             }
-            break;
+            /* Retail 0x0050826E: a match jumps to 0x00508773 (mov al,1; ret); g_fact_values is never read. */
+            return 1;
         }
         case W8_FACT_PEACE_DRAZIC_IN_PARTY:
             return NpcLeadHasNameStyle(W8_NPC_DRAZIC);
@@ -144,7 +148,8 @@ unsigned char EvaluateFact(W8FactId fact_id)
             if (!NpcLeadHasNameStyle(W8_NPC_RODAN) || !NpcLeadHasNameStyle(W8_NPC_DRAZIC)) {
                 return 0;
             }
-            break;
+            /* Retail 0x005082D5: both present jumps to 0x00508773 (mov al,1; ret). */
+            return 1;
         case W8_FACT_VI_IN_PARTY:
             return NpcLeadHasNameStyle(W8_NPC_VI_DOMINA);
         case W8_FACT_GLUMPH_DEAD: {
@@ -170,9 +175,9 @@ unsigned char EvaluateFact(W8FactId fact_id)
                     return 0;
                 }
                 g_status.fact_88_latch = true;
-                return 1;
             }
-            break;
+            /* Retail 0x0050841C: latch already set jumps to 0x00508773 (mov al,1; ret), so it stays 1. */
+            return 1;
         case W8_FACT_UMISSION_TRAIN_WETSUIT:
             return EveryCharacterHasItem(0x1e5, 0);
         case W8_FACT_UMISSION_IUFPASS_LEVEL2:
@@ -247,8 +252,11 @@ unsigned char EvaluateFact(W8FactId fact_id)
                 return g_fact_values[fact_id];
             }
             W8NpcState* npc = GetNpcStateByKind(0x18);
+            /* Retail 0x0050884f: cmp [..+0xb01],0xf / jae - unsigned. */
             if (npc != 0 &&
-                g_status.buffers.Char[npc->group_index].highest_condition >= W8_CONDITION_ASLEEP) {
+                static_cast<unsigned int>(
+                    g_status.buffers.Char[npc->group_index].highest_condition) >=
+                    W8_CONDITION_ASLEEP) {
                 return 1;
             }
             return 0;

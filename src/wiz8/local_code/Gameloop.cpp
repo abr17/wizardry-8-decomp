@@ -38,6 +38,7 @@
 #include "wiz8/local_code/UtilityFunctions.h"
 #include "wiz8/monster_generators.h"
 #include "wiz8/regions.h"
+#include "wiz8/wide_art.h"
 #include "Button System.h"
 #include "LibraryDataBase.h"
 #include <stdlib.h>
@@ -166,6 +167,9 @@ void GameLoop(void)
         }
         state = g_pending_screen_state.id;
         g_current_screen_state = g_pending_screen_state;
+        /* Mod (wide canvas): the wide background of the previous screen (level loading,
+           death, ending...) must not remain in the side bars of the new one. */
+        ReleaseWideFullscreenArt();
         if (!g_screen_handlers[state].enter()) {
             g_current_screen_state.id = W8_SCREEN_NONE;
             gfProgramIsRunning = 0;
@@ -184,6 +188,8 @@ void GameLoop(void)
         gfProgramIsRunning = 0;
         return;
     }
+    /* Mod: stone wings at the sides of interface windows (wide_art.h). */
+    UpdateWideSideWings(state);
     g_screen_handlers[state].frame();
 }
 

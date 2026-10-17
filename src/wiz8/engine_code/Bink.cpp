@@ -19,8 +19,11 @@ void NoOp(int result, int line, const char* source)
 }
 
 // FUNCTION: WIZ8 0x005e2f90
-W8BinkVideo::W8BinkVideo() : m_handle(0)
+W8BinkVideo::W8BinkVideo() : m_handle(0), m_target(0)
 {
+    /* Mod: retail left m_target uninitialized (BeginVideoPresentation always
+       supplied a surface, or failed); borderless mode supplies none, so the
+       player must start with no target and write into the 2D canvas. */
     memset(unknown_04, 0, sizeof(unknown_04));
 }
 

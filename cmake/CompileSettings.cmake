@@ -5,6 +5,20 @@
 # flag, so it stays behind a compiler-id condition rather than leaking into
 # clang-cl as a file name.
 add_library(wiz8_compile_settings INTERFACE)
+if(WIZ8_MODERN_MSVC)
+    # msvc2022 port: VC6 language model on a modern compiler. /G6 no longer
+    # exists; the CRT is the static one (/MT), see wiz8-widescreen docs/decomp-port.md.
+    target_compile_options(wiz8_compile_settings INTERFACE
+        /nologo /Z7
+        "/FI${CMAKE_CURRENT_SOURCE_DIR}/include/wiz8/compat/compiler.h"
+        /O2 /MT
+        ${WIZ8_MODERN_MSVC_FLAGS}
+        "$<$<COMPILE_LANGUAGE:CXX>:/GR->"
+    )
+    target_compile_definitions(wiz8_compile_settings INTERFACE ${WIZ8_MODERN_MSVC_DEFINES})
+    target_include_directories(wiz8_compile_settings INTERFACE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/wiz8/compat/modern_msvc")
+else()
 target_compile_options(wiz8_compile_settings INTERFACE
     /nologo /Z7
     "/FI${CMAKE_CURRENT_SOURCE_DIR}/include/wiz8/compat/compiler.h"
@@ -15,6 +29,7 @@ target_compile_options(wiz8_compile_settings INTERFACE
     "$<$<COMPILE_LANG_AND_ID:C,MSVC>:/G6>"
     "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/G6>"
 )
+endif()
 target_compile_definitions(wiz8_compile_settings INTERFACE
     NDEBUG NOMINMAX WIN32_LEAN_AND_MEAN
 )

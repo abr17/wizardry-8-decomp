@@ -141,6 +141,8 @@ EXPORTS
     ?getFogColor@srScene@@QBEXAAV?$srVector3T@M@@@Z
     ?getHeight@srGERD@@QBEJXZ
     ?getWidth@srGERD@@QBEJXZ
+    ?getMaxTextureWidth@srGERD@@QBEJXZ
+    ?getMaxTextureHeight@srGERD@@QBEJXZ
     ?resetStatistics@srGERD@@QAEXXZ
     ?setClearColor@srGERD@@QAEXMMMM@Z
     ?setScissor@srGERD@@QAEXKKKK@Z
@@ -921,3 +923,16 @@ EXPORTS
     ?storeSymbolTable@Compressor@srHuffman@@QAEXAAVBitOStream@2@@Z
     ?translate@srGERD@@QAEXNNN@Z
     ?traverse@srIlluminator@@UAEXAAVTraverseInfo@srNode@@@Z
+
+; msvc2022 port: real retail SR.dll exports that the VC6 build inlined or
+; generated locally (inline / implicit members of dllimport classes) but
+; MSVC 2022 calls through the import table. All present in the retail SR.dll export table (dumpbin /exports).
+    ??0srLight@@QAE@ABV0@@Z
+    ?setVertexPointer@srGERD@@QAEXJW4e_type@srRendererDefs@@KPBXJ@Z
+    ?sGetClassName@srCamera@@SAPBDXZ
+    ?sGetClassName@srClipPlane@@SAPBDXZ
+    ?sGetClassName@srScene@@SAPBDXZ
+    ?sGetClassName@srTextureMap@@SAPBDXZ
+    ?sGetClassName@srLight@@SAPBDXZ
+    ?sGetClassName@srModel@@SAPBDXZ
+    ?sGetClassName@srTextureIFace@@SAPBDXZ

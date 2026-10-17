@@ -48,6 +48,10 @@ public:
     friend void SetDialogDestroyCallback(W8DialogBase* dialog, W8DialogDestroyCallback callback);
     friend class W8DialogNumericInput;
 
+    /* Mod (window layouter, canvas.h): report the frame of the open dialog
+       so it is drawn centered over the laid-out window. Every frame. */
+    void ReportZoneOverlay();
+
 public:
     /* Main Game raises the redraw bit when promoting its pending dialog. */
     unsigned int m_dirty_flags;
