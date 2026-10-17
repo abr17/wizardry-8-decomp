@@ -7,6 +7,10 @@
 > (tag `wiz8-widescreen-1.0.0` = the 1.0.0 release); build instructions and design notes are there.
 > Comments that mention "wiz8-widescreen docs/..." or "scripts/..." refer to that repository.
 >
+> **Made with AI:** the widescreen changes in this branch (reverse engineering, code and comments)
+> were written by AI coding agents (Claude Code, using REA for reverse engineering), directed and
+> tested by abr17.
+>
 > **Licensing:** upstream has no licence file. The Standard Gaming Platform code under `src/sgp` is
 > distributed under Strategy First's non-commercial SFI Source Code License Agreement, and reconstructed
 > code derived from it is not offered under broader terms. The widescreen changes in this branch follow
