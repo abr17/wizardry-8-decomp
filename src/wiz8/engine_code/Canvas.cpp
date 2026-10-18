@@ -269,9 +269,12 @@ int DisplayModeSetting(void)
 
 bool DisplayVideosOnCanvas(void)
 {
-    /* Bink videos via the 2D canvas (without switching the monitor to 640x480) - in
-       borderless and window; only true full screen - as in the original. */
-    return DisplayModeSetting() != W8_DISPLAY_FULLSCREEN;
+    /* Bink videos via the 2D canvas (without switching the monitor to 640x480) in every
+       mode. Full screen used to play them as the original (exclusive 640x480): with
+       dgVoodoo keeping the monitor's own mode (ScalingMode = stretched_ar) that made the
+       picture go black and jump from the chosen resolution's shape to 4:3 and back at the
+       start and the end of every video. */
+    return true;
 }
 
 void DisplayResolutionSetting(int* width, int* height)
@@ -615,9 +618,14 @@ void CanvasInitialize(void)
     g_canvas_cols = width / W8_DIRTY_CELL;
     g_canvas_cells = g_canvas_cols * W8_CANVAS_ROWS;
     s_draw_origin = g_canvas_ox; /* 2D is drawn into the centered window */
-    /* By default mouse scaling is on only for a wide canvas: at
-       W = 640 the mouse works exactly as in the original (regression reference). */
-    s_mouse_scale = mouse_scale < 0 ? (g_canvas_w > W8_GAME_W) : (mouse_scale != 0);
+    /* By default mouse scaling is on for a wide canvas and in full screen: there
+       dgVoodoo (ScalingMode = stretched_ar) keeps the monitor's own mode and shows the
+       picture with black bars, so screen pixels no longer match the game's. In a
+       W = 640 window or borderless the mouse works exactly as in the original
+       (regression reference). */
+    s_mouse_scale = mouse_scale < 0
+                        ? (g_canvas_w > W8_GAME_W || DisplayModeSetting() == W8_DISPLAY_FULLSCREEN)
+                        : (mouse_scale != 0);
 
     _snprintf(text, sizeof(text), "ini: %s", ini);
     text[sizeof(text) - 1] = '\0';
@@ -730,30 +738,53 @@ static int CeilDiv(long long a, long long b)
     return -FloorDiv(-a, b);
 }
 
-/* Size of the game window's client area = the size the canvas is stretched to. */
-static bool OutputSize(int* width, int* height)
+/* Where the canvas is shown in the game window's client area: normally the whole client
+   area. In full screen dgVoodoo (ScalingMode = stretched_ar) keeps the monitor's own mode
+   and fits the game's mode into it keeping the proportions, with black bars (1920x1080
+   on a 2560x1600 monitor: 2560x1440 at y = 80), so the picture is the centered rectangle
+   of the mode's aspect ratio. Without the bars the result is the whole client area. */
+static bool OutputRect(int* left, int* top, int* width, int* height)
 {
     RECT client;
     if (ghWindow == 0 || !GetClientRect(ghWindow, &client) || client.right <= 0 ||
         client.bottom <= 0) {
         return false;
     }
+    *left = 0;
+    *top = 0;
     *width = client.right;
     *height = client.bottom;
+    if (DisplayModeSetting() == W8_DISPLAY_FULLSCREEN) {
+        int mode_w;
+        int mode_h;
+        DisplayResolutionSetting(&mode_w, &mode_h);
+        if (mode_w > 0 && mode_h > 0) {
+            if (static_cast<long long>(client.right) * mode_h >
+                static_cast<long long>(client.bottom) * mode_w) {
+                *width = static_cast<int>(static_cast<long long>(client.bottom) * mode_w / mode_h);
+                *left = (client.right - *width) / 2; /* bars left and right */
+            } else {
+                *height = static_cast<int>(static_cast<long long>(client.right) * mode_h / mode_w);
+                *top = (client.bottom - *height) / 2; /* bars top and bottom */
+            }
+        }
+    }
     return true;
 }
 
 void CanvasScreenToCanvas(int screen_x, int screen_y, int* canvas_x, int* canvas_y)
 {
+    int out_x;
+    int out_y;
     int out_w;
     int out_h;
-    if (!s_mouse_scale || !OutputSize(&out_w, &out_h)) {
+    if (!s_mouse_scale || !OutputRect(&out_x, &out_y, &out_w, &out_h)) {
         *canvas_x = screen_x;
         *canvas_y = screen_y;
         return;
     }
-    *canvas_x = FloorDiv(static_cast<long long>(screen_x) * g_canvas_w, out_w);
-    *canvas_y = FloorDiv(static_cast<long long>(screen_y) * W8_GAME_H, out_h);
+    *canvas_x = FloorDiv(static_cast<long long>(screen_x - out_x) * g_canvas_w, out_w);
+    *canvas_y = FloorDiv(static_cast<long long>(screen_y - out_y) * W8_GAME_H, out_h);
 }
 
 /* A screen point inside canvas cell c: its middle if possible (then
@@ -770,15 +801,17 @@ static int CanvasAxisToScreen(int c, int canvas_extent, int out_extent)
 
 void CanvasCanvasToScreen(int canvas_x, int canvas_y, int* screen_x, int* screen_y)
 {
+    int out_x;
+    int out_y;
     int out_w;
     int out_h;
-    if (!s_mouse_scale || !OutputSize(&out_w, &out_h)) {
+    if (!s_mouse_scale || !OutputRect(&out_x, &out_y, &out_w, &out_h)) {
         *screen_x = canvas_x;
         *screen_y = canvas_y;
         return;
     }
-    *screen_x = CanvasAxisToScreen(canvas_x, g_canvas_w, out_w);
-    *screen_y = CanvasAxisToScreen(canvas_y, W8_GAME_H, out_h);
+    *screen_x = out_x + CanvasAxisToScreen(canvas_x, g_canvas_w, out_w);
+    *screen_y = out_y + CanvasAxisToScreen(canvas_y, W8_GAME_H, out_h);
 }
 
 bool CanvasMouseMapActive(void)

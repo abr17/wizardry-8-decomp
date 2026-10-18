@@ -110,7 +110,7 @@ void IntroScreenFrame(void)
     /* Borderless: the video screen never renders (retail frames went straight
        to the exclusive primary surface). The player now writes into the 2D
        canvas, so present it like any other screen while a video plays. */
-    if (gpVideo != 0 && DisplayVideosOnCanvas()) { /* borderless window and windowed mode */
+    if (gpVideo != 0 && DisplayVideosOnCanvas()) { /* every display mode now */
         RenderFrame();
     }
 }

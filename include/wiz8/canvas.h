@@ -44,7 +44,8 @@ void CanvasLogLine(const char* text);
 
 /* Borderless (wiz8wide.ini [Display] Borderless=1, default 1): a WS_POPUP
    window the size of the monitor, but the monitor resolution is NEVER changed -
-   neither at startup nor for Bink videos (they go through the 2D canvas). /WINDOW
+   neither at startup nor for Bink videos (they go through the 2D canvas, in every display
+   mode since 1.0.1). /WINDOW
    and the "full screen" toggle do nothing. Alt+Tab resets stuck
    Shift/Ctrl/Alt. Borderless=0 - the original's behavior.
    Read on the first call (may come before CanvasInitialize: the /WINDOW
