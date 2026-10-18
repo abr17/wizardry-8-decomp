@@ -37,6 +37,10 @@
 #include "wiz8/canvas.h"
 #include "wiz8/wide_art.h"
 
+#ifndef WIZ8WIDE_VERSION
+#define WIZ8WIDE_VERSION "" /* set by the hybrid build from VERSION; none in the port build */
+#endif
+
 /* The screen's own state. */
 // GLOBAL: WIZ8 0x0069c4ba
 bool g_main_menu_has_save_games;
@@ -205,6 +209,10 @@ unsigned char MainMenuScreenEnter(void)
     DrawMainMenuItem(g_main_menu_selected_item, 1);
 
     FormatVersionBanner(text, false, false, false);
+    /* Mod: the widescreen patch version after the game's: "v1.2.4 (Widescreen v1.0.1)" */
+    if (WIZ8WIDE_VERSION[0] != '\0') {
+        strcat(text, " (Widescreen v" WIZ8WIDE_VERSION ")");
+    }
     wcscpy(wide, ConvertStringToWide(text));
     SetFont(g_wiz_text_font_secondary);
     SetFontObjectPalette16BPP(g_wiz_text_font_secondary,
