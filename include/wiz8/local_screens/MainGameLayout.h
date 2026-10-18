@@ -53,6 +53,12 @@ void MainGameViewportRect(int mode, W8ScreenRect* rect);
 void DrawCatalogImageWide(int object, int frame, int image, int left, int top, int width,
                           int cut_left, int cut_right, bool invalidate);
 
+/* Combat round progress bar on the roof (image 0x8d, 286x13 at 177,2), filled to percent.
+   The roof recess under it is widened by 2*ox (DrawCatalogImageWide of the roof), so the bar
+   is stretched the same way (repeating its middle) and the fill runs over the whole recess
+   177..463+2*ox. Only in the wide layout. */
+void DrawCombatProgressWide(int percent);
+
 /* A piece of a catalog image: the image in its own coordinates (left, top), the window
    origin on the canvas = origin (canvas_x = origin + image x), only the strip
    [clip_left, clip_right) in the same coordinates is visible. Not marked for re-upload.

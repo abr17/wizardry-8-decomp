@@ -3675,9 +3675,16 @@ void ApplyMainGameRedrawFlags(void)
         RedrawRoofButtons();
         RefreshSpellIconHudRows();
     }
+    /* Retail 0x563365..0x56336e tests the byte at offset 0 (execution_active), not
+       round_active: the bar grows while the round's actions run and is gone (the roof
+       redraw covers it) while the party waits for orders. */
     if ((g_level_block->redraw_flags & W8_MAIN_REDRAW_COMBAT_PROGRESS) != 0 &&
-        gXStatus.fCombatMode && g_combat_state->round_active) {
+        gXStatus.fCombatMode && g_combat_state->execution_active == 1) {
         health_percent = GetCombatActionProgress(0);
+        if (CanvasWideLayoutActive()) {
+            /* Wide canvas: the roof recess is wider, so the bar is stretched to fill it. */
+            DrawCombatProgressWide(health_percent);
+        } else {
         GetClippingRect(&saved_clip);
         combat_clip.iRight = (health_percent * 0x11e) / 100 + 0xb1;
         combat_clip.iTop = 0;
@@ -3686,6 +3693,7 @@ void ApplyMainGameRedrawFlags(void)
         SetClippingRect(&combat_clip);
         DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x8d, 0, 0, 0xb1, 2, VO_BLT_SRCTRANSPARENCY, 0);
         SetClippingRect(&saved_clip);
+        }
     }
     if (gXStatus.fReviewCharacterMode) {
         if (((g_level_block->redraw_flags & W8_MAIN_REDRAW_PORTRAIT_PANEL) == 0) ||

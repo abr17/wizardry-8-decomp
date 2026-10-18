@@ -242,6 +242,57 @@ void DrawCatalogImageWide(int object, int frame, int image, int left, int top, i
     }
 }
 
+void DrawCombatProgressWide(int percent)
+{
+    const int ox = g_canvas_ox;
+    const int left = 0xb1;      /* 177: bar position, as in the original */
+    const int top = 2;
+    const int width = 0x11e;    /* 286: bar image width */
+    const int cut_left = 123;   /* repeated middle slice of the bar image */
+    const int cut_right = 163;
+    const int slice = cut_right - cut_left;
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+    /* Canvas x where the fill ends: the whole widened recess is 286 + 2*ox long. */
+    const int fill = left + (percent * (width + 2 * ox)) / 100;
+    const int fill_end = left + cut_right + 2 * ox; /* canvas: where the right part starts */
+    SGPRect saved_clip;
+    GetClippingRect(&saved_clip);
+    SGPRect base = {0, 0, 0x280, 0x1e0};
+    /* A piece drawn with window origin o shows canvas [a, b) as image x [a - o, b - o). */
+    int right = left + cut_right;
+    if (right > fill) {
+        right = fill;
+    }
+    DrawWidePiece(0x8d, 0, 0, left, top, 0, left, right, base);
+    for (int k = 1; (k - 1) * slice < 2 * ox; ++k) {
+        const int origin = k * slice;
+        right = left + cut_right;
+        if (right > fill_end - origin) {
+            right = fill_end - origin;
+        }
+        if (right > fill - origin) {
+            right = fill - origin;
+        }
+        DrawWidePiece(0x8d, 0, 0, left, top, origin, left + cut_left, right, base);
+    }
+    right = left + width;
+    if (right > fill - 2 * ox) {
+        right = fill - 2 * ox;
+    }
+    DrawWidePiece(0x8d, 0, 0, left, top, 2 * ox, left + cut_right, right, base);
+    SetClippingRect(&saved_clip);
+
+    short image_width = 0;
+    short image_height = 0;
+    GetCatalogImageSize(0x8d, 0, 0, &image_width, &image_height);
+    CanvasOriginScope scope(0);
+    InvalidateRegion(left, top, left + width + 2 * ox, top + image_height, 1);
+}
+
 void ClearSurfaceRectWide(int left, int top, int right, int bottom)
 {
     if (!CanvasWideLayoutActive()) {
