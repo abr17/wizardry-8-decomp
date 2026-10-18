@@ -528,6 +528,8 @@ unsigned char InitializeVideoManager(HINSTANCE instance, unsigned short show_com
     }
     /* Wide canvas: pick W (wiz8wide.ini) before the window and the surface exist. */
     CanvasInitialize();
+    /* Walk the monitor's mode list now, in the background (Options - Video needs it). */
+    StartScreenSizeScan();
     /* Display mode from the settings (wiz8wide.ini [Display] Mode): borderless and
        full screen - a popup window the size of the monitor, window - with a frame. */
     g_fullscreen = DisplayModeSetting() == W8_DISPLAY_WINDOW ? 0 : 1;

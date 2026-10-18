@@ -2038,7 +2038,43 @@ void FormatSize(wchar_t* out, int width, int height)
     *out = L'\0';
 }
 
+/* The monitor's mode list is long (1300+ entries with every refresh rate on a modern
+   driver) and EnumDisplaySettings takes about a second to walk it, which froze the
+   Video options page every time it opened. The list is walked once, on a worker
+   thread started at video start-up (StartScreenSizeScan), and reused afterwards. */
+static HANDLE s_screen_scan_thread;
+static volatile LONG s_screen_scan_done;
+
+static void CollectScreenSizesNow(void);
+
+static DWORD WINAPI ScreenSizeScanThread(LPVOID)
+{
+    CollectScreenSizesNow();
+    InterlockedExchange(&s_screen_scan_done, 1);
+    return 0;
+}
+
+void BeginScreenSizeScan(void)
+{
+    if (s_screen_scan_thread == 0 && s_screen_scan_done == 0) {
+        s_screen_scan_thread = CreateThread(0, 0, ScreenSizeScanThread, 0, 0, 0);
+    }
+}
+
 void CollectScreenSizes(void)
+{
+    if (s_screen_scan_thread != 0) {
+        WaitForSingleObject(s_screen_scan_thread, INFINITE);
+        CloseHandle(s_screen_scan_thread);
+        s_screen_scan_thread = 0;
+    }
+    if (s_screen_scan_done == 0) {
+        CollectScreenSizesNow();
+        s_screen_scan_done = 1;
+    }
+}
+
+static void CollectScreenSizesNow(void)
 {
     g_screen_size_count = 0;
     int desktop_w;
@@ -2360,6 +2396,12 @@ public:
 };
 
 } // namespace
+
+/* canvas.h: called from InitializeVideoManager (outside the anonymous namespace above). */
+void StartScreenSizeScan(void)
+{
+    BeginScreenSizeScan();
+}
 
 /* Panels deleted (leaving the settings): forget the pointers to their children, otherwise
    a new panel at the old address could match g_dropdown.owner. */

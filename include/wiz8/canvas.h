@@ -79,6 +79,8 @@ void DisplayDesktopWorkArea(struct tagRECT* work); /* RECT */
 void DisplayForceMode(int mode);
 /* Video2.cpp: the monitor supports this full-screen mode (SurRender). */
 bool VideoFullscreenSizeSupported(int width, int height);
+/* OptionsScreen.cpp: walk the monitor's mode list on a worker thread (it takes ~1 s). */
+void StartScreenSizeScan(void);
 /* Canvas width W that CanvasInitialize would pick for this output. */
 int CanvasWidthForOutput(int width, int height);
 /* Video2.cpp: apply the display mode and resolution from the settings right away.
