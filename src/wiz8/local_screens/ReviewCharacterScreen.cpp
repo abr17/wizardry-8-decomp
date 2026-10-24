@@ -113,8 +113,14 @@ bool g_camp_character_pending;
 unsigned int g_camp_item_region_set;
 // GLOBAL: WIZ8 0x0069c10c
 w8_ulong g_fade_tick_base;
+/* Named callback type: the hybrid build binds a global to its retail address by
+   the name it reads at the end of the declaration, and "void (*g_fade_callback)(void)"
+   ends in ")". Unbound, wiz8hy.dll kept a private copy that the retail
+   UpdateScreenFade never read, so no fade callback ran (party death hung since
+   1.0.0; the endings use the same callback). */
+typedef void (*W8FadeCallback)(void);
 // GLOBAL: WIZ8 0x0069c110
-void (*g_fade_callback)(void);
+W8FadeCallback g_fade_callback;
 // GLOBAL: WIZ8 0x0069c114
 unsigned char g_fade_flag;
 // GLOBAL: WIZ8 0x0069c118

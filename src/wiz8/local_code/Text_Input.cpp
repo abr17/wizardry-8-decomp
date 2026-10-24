@@ -1013,21 +1013,21 @@ void MouseClickedInTextRegionCallback(MOUSE_REGION* region, int reason)
         return;
     MSYS_ReleaseMouse(region);
 
-    TEXTINPUTNODE* clicked = gpTextInputHead;
-    if (gpActive != 0) {
-        if (field_index != gpActive->ubID)
-            RenderInactiveTextFieldNode(gpActive);
+    /* Retail 0x5d50a2: the switch is decided by id, not by node pointer. Starting the
+       search from gpTextInputHead and comparing the pointer with gpActive skipped the switch
+       whenever the active field was the head of the list (Full Name on the name page), so a
+       click on Nickname did nothing. A click whose id has no node falls through to the
+       same-field caret code below, as in retail. */
+    TEXTINPUTNODE* clicked = 0;
+    if (gpActive != 0 && field_index != gpActive->ubID)
+        RenderInactiveTextFieldNode(gpActive);
+    if (gpActive == 0 || field_index != gpActive->ubID) {
         clicked = gpTextInputHead;
-        if (field_index == gpActive->ubID)
-            clicked = gpActive;
-    }
-
-    if (clicked != gpActive) {
         while (clicked != 0 && clicked->ubID != field_index)
             clicked = clicked->next;
-        if (clicked == 0)
-            return;
+    }
 
+    if (clicked != 0) {
         TEXTINPUTNODE* candidate = gpTextInputHead;
         while (candidate != 0 && (candidate == gpActive || candidate->ubID != clicked->ubID ||
                                   candidate->fEnabled == 0)) {
@@ -1055,7 +1055,7 @@ void MouseClickedInTextRegionCallback(MOUSE_REGION* region, int reason)
     }
 
     unsigned char position = gubParkingPos;
-    if (gfLeftButtonState != 0) {
+    if (gfLeftButtonState != 0 && gpActive != 0) {
         if (gpActive->szString == 0) {
             position = 0;
         } else {

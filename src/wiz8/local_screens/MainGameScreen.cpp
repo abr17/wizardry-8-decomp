@@ -3685,14 +3685,14 @@ void ApplyMainGameRedrawFlags(void)
             /* Wide canvas: the roof recess is wider, so the bar is stretched to fill it. */
             DrawCombatProgressWide(health_percent);
         } else {
-        GetClippingRect(&saved_clip);
-        combat_clip.iRight = (health_percent * 0x11e) / 100 + 0xb1;
-        combat_clip.iTop = 0;
-        combat_clip.iBottom = 0x1e0;
-        combat_clip.iLeft = 0;
-        SetClippingRect(&combat_clip);
-        DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x8d, 0, 0, 0xb1, 2, VO_BLT_SRCTRANSPARENCY, 0);
-        SetClippingRect(&saved_clip);
+            GetClippingRect(&saved_clip);
+            combat_clip.iRight = (health_percent * 0x11e) / 100 + 0xb1;
+            combat_clip.iTop = 0;
+            combat_clip.iBottom = 0x1e0;
+            combat_clip.iLeft = 0;
+            SetClippingRect(&combat_clip);
+            DrawCatalogImageAndInvalidate(FRAME_BUFFER, 0x8d, 0, 0, 0xb1, 2, VO_BLT_SRCTRANSPARENCY, 0);
+            SetClippingRect(&saved_clip);
         }
     }
     if (gXStatus.fReviewCharacterMode) {

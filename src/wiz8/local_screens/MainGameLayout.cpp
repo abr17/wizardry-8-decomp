@@ -212,7 +212,10 @@ void DrawCatalogImageWide(int object, int frame, int image, int left, int top, i
         }
         return;
     }
-    LogStretchWithoutStrip(object, frame, image, width, cut_left, cut_right);
+    if (object != 0x1b8) { /* the journal parchment's insert is redrawn by mirroring
+                              (JournalScreen.cpp, DrawJournalParchment): no strip needed */
+        LogStretchWithoutStrip(object, frame, image, width, cut_left, cut_right);
+    }
 
     /* 1) Left part [0, cut_right) at the left canvas edge (window origin 0). */
     DrawWidePiece(object, frame, image, left, top, 0, left, left + cut_right, saved_clip);

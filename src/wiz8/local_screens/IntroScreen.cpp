@@ -107,10 +107,11 @@ void IntroScreenFrame(void)
     if (gpVideo == 0 || gpVideo->UpdateFrame()) {
         AdvanceIntroScreen();
     }
-    /* Borderless: the video screen never renders (retail frames went straight
-       to the exclusive primary surface). The player now writes into the 2D
-       canvas, so present it like any other screen while a video plays. */
-    if (gpVideo != 0 && DisplayVideosOnCanvas()) { /* every display mode now */
+    /* Mod (videos on the canvas, every display mode since 1.0.1): the video screen
+       never renders (retail frames went straight to the exclusive primary surface).
+       The player now writes into the 2D canvas, so present it like any other screen
+       while a video plays. */
+    if (gpVideo != 0 && DisplayVideosOnCanvas()) {
         RenderFrame();
     }
 }
