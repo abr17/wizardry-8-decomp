@@ -18,6 +18,8 @@
 #ifndef WIZ8_CANVAS_H
 #define WIZ8_CANVAS_H
 
+#include <stddef.h>
+
 enum {
     W8_GAME_W = 640,          /* width of game coordinates (never changes) */
     W8_GAME_H = 480,          /* height of both the game and the canvas */
@@ -41,6 +43,10 @@ void CanvasInitialize(void);
 /* Append a line to wiz8wide.log (next to the exe) and to the debugger. For rare
    events (not every frame). */
 void CanvasLogLine(const char* text);
+
+/* The path of a file next to the exe (name - file name only); just the name if the exe
+   path cannot be read, cut to `size`. */
+void PathNextToExe(const char* name, char* out, size_t size);
 
 /* Borderless (wiz8wide.ini [Display] Borderless=1, default 1): a WS_POPUP
    window the size of the monitor, but the monitor resolution is NEVER changed -
@@ -122,10 +128,19 @@ void CanvasCountFrame(void);
    per second the movement is below the threshold, and on a slope (ground contact
    every frame) the party cannot start moving. The original runs at ~220 fps on
    this machine and gets through; the build without a limit ran at ~1000 and got
-   stuck. Called once per frame from RenderFrame, after CanvasCountFrame. */
-enum { W8_DEFAULT_MAX_FPS = 120 };
+   stuck. Called once per frame from RenderFrame, after CanvasCountFrame.
+   The default is 60 since 1.0.2 (120 before): the party has no step-up code and gets over a
+   tall ledge only when one frame's travel jumps past the point where the riser stops it,
+   so the shorter frames of a high rate make ledges and stairs harder (the Umpani camp
+   doors); 60 is what the game had on a good 2001 PC. DisplaySetMaxFps (Options - Video,
+   page 3) applies at once and writes the ini. */
+enum { W8_DEFAULT_MAX_FPS = 60 };
 int DisplayMaxFps(void);
+void DisplaySetMaxFps(int fps);
 void CanvasLimitFrameRate(void);
+/* The next CanvasLimitFrameRate call returns at once (for a frame presented in two
+   RenderFrame calls: the experimental map controls' redraw). */
+void CanvasSkipNextFrameLimit(void);
 
 /* Frame capture on request (for automated tests): if the file wiz8shot.req
    appears next to the exe, it is deleted and true is returned - RenderFrame then

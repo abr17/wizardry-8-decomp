@@ -1,5 +1,6 @@
 #include "wiz8/xstatus.h"
 #include "wiz8/canvas.h"
+#include "wiz8/experimental.h"
 #include "wiz8/w8diff_port.h"
 #include "wiz8/wide_art.h"
 #ifdef WIZ8_RUNTIME_TESTS
@@ -22,6 +23,7 @@
 #include "wiz8/engine_code/stModelInstance.h"
 #include "wiz8/engine_code/Level.h"
 #include "wiz8/engine_code/stCube.h"
+#include "wiz8/engine_code/stLight.hpp" /* Experimental (FrameRateFix): the camera light moved with the camera */
 #include "wiz8/engine_code/stMeshModel.h"
 #include "wiz8/float_constants.h"
 #include "wiz8/fonts.h"
@@ -1073,14 +1075,16 @@ IDirectDrawSurface2* BeginVideoPresentation(void)
     DDSURFACEDESC description;
 
     if (DisplayVideosOnCanvas()) {
-        /* Borderless: no exclusive mode, no 640x480 switch, the renderer stays
-           open. Without a target surface the Bink player writes each frame into
-           the 2D canvas (LockPrimarySurface: the centered 640x480 window) and
-           invalidates its dirty rectangles; IntroScreenFrame then renders the
-           frame like any other screen. W8BinkVideo's constructor clears
+        /* Mod: videos go through the canvas in every display mode (since 1.0.1;
+           DisplayVideosOnCanvas() is always true): no exclusive mode, no 640x480
+           switch, the renderer stays open. Without a target surface the Bink player
+           writes each frame into the 2D canvas (LockPrimarySurface: the centered
+           640x480 window) and invalidates its dirty rectangles; IntroScreenFrame then
+           renders the frame like any other screen. W8BinkVideo's constructor clears
            m_target, so the player never sees a stale pointer. */
         return 0;
     }
+    /* The original's exclusive-mode video path, kept as transcribed; unreachable since 1.0.1. */
     if (g_gerd != 0) {
         g_flush_pending = false;
         g_gerd->closeWindow(static_cast<srGERD::e_closeHint>(1));
@@ -1113,11 +1117,13 @@ IDirectDrawSurface2* BeginVideoPresentation(void)
 unsigned char FinishVideoPresentation(void)
 {
     if (DisplayVideosOnCanvas()) {
-        /* Borderless: nothing was torn down; just make the next screen redraw
-           the whole canvas over the last video frame. */
+        /* Mod (videos on the canvas, see BeginVideoPresentation): nothing was torn
+           down; just make the next screen redraw the whole canvas over the last video
+           frame. */
         InvalidateCanvas(0);
         return 1;
     }
+    /* The original's exclusive-mode path, unreachable since 1.0.1 (as above). */
     if (g_video_primary_surface1 != 0) {
         g_video_primary_surface1->Release();
         g_video_primary_surface1 = 0;
@@ -1434,7 +1440,35 @@ void RenderFrame(void)
     if (g_trigger_action_active && GetWorld() != 0) {
         GetCameraPosition(&saved_world_position);
         shifted_world_position = saved_world_position + g_trigger_action_scene_offset;
+        /* Experimental (experimental.h, FrameRateFix): shake around the point between the
+           last two movement steps (below), not the last step */
+        float shake_point[3] = {saved_world_position.x, saved_world_position.y, saved_world_position.z};
+        float shake_draw[3];
+        if (FixedTickRenderPoint(shake_point, shake_draw)) {
+            shifted_world_position.Set(shake_draw[0] + g_trigger_action_scene_offset.x,
+                                       shake_draw[1] + g_trigger_action_scene_offset.y,
+                                       shake_draw[2] + g_trigger_action_scene_offset.z);
+        }
         SetWorldScenePosition(GetWorld(), &shifted_world_position);
+    }
+    /* Experimental (experimental.h, FrameRateFix): the party moves in fixed steps; draw the
+       world (and pick) from between the last two, the camera goes back after the frame. */
+    srVector3T<double> fixed_tick_location;
+    bool fixed_tick_drawn = false;
+    if (g_world != 0 && g_world->camera != 0 && !g_trigger_action_active) {
+        fixed_tick_location = g_world->camera->getLocation();
+        float camera_point[3] = {static_cast<float>(fixed_tick_location.x),
+                                 static_cast<float>(fixed_tick_location.y),
+                                 static_cast<float>(fixed_tick_location.z)};
+        float draw_point[3];
+        if (FixedTickRenderPoint(camera_point, draw_point)) {
+            srVector3T<double> draw_location(draw_point[0], draw_point[1], draw_point[2]);
+            g_world->camera->setLocation(draw_location);
+            if (g_world->camera_light != 0) {
+                static_cast<srNode*>(g_world->camera_light)->setLocation(draw_location);
+            }
+            fixed_tick_drawn = true;
+        }
     }
     if (g_world != 0) {
         if (!IsSkyEnabled()) {
@@ -1557,6 +1591,12 @@ void RenderFrame(void)
 #ifdef WIZ8_RUNTIME_TESTS
     RuntimeObserve(RUNTIME_FRAME_SUBMITTED, g_fps_frame_count, g_current_screen_state.id, 0);
 #endif
+    if (fixed_tick_drawn) { /* Experimental: the game logic sees the camera where the steps put it */
+        g_world->camera->setLocation(fixed_tick_location);
+        if (g_world->camera_light != 0) {
+            static_cast<srNode*>(g_world->camera_light)->setLocation(fixed_tick_location);
+        }
+    }
 
     W8DiffPortPoll(); /* mod: comparison rig against the original, see w8diff_port.h */
     if (CanvasTakeScreenshotRequest()) { /* mod: automated tests, see canvas.h */
@@ -1579,6 +1619,7 @@ void RenderFrame(void)
     g_overlay_page_counters[next_page] = 0;
     g_page_full_redraw[next_page] = 0;
     ++g_fps_frame_count;
+    FrameRateCountFrame(); /* Experimental (experimental.h, FrameRateFix) */
     retire_prerender = next_page ? g_scene_prerender1 : g_scene_prerender0;
     retire_overlay = next_page ? g_scene_overlay1 : g_scene_overlay0;
     PurgeInactiveSceneInstances(retire_prerender);
@@ -4056,6 +4097,9 @@ srModelInstance* Video2DRectToPolygon(const W8ControlsRect* rect, void* source, 
     if (surface == 0) {
         return 0;
     }
+    /* as retail (0x0042440e): the brush's texture becomes the only owner; without it every
+       tooltip, radar backdrop and overlay sprite leaked its surface (128 KB a tooltip) */
+    surface->autoRelease();
     surface->setFilter(&srBoxFilter);
     float scale_x;
     float scale_y;

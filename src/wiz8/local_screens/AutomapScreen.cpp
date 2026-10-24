@@ -50,6 +50,7 @@
 #include "wiz8/local_screens/MGSKeyboard.h"
 #include "wiz8/local_screens/MainGameLayout.h"
 #include "wiz8/canvas.h"
+#include "wiz8/experimental.h"
 #include "input.h"
 #include "Types.h"
 #include "FileMan.h"
@@ -353,7 +354,15 @@ static void SetAutomapCursorImage(int tool)
 // FUNCTION: WIZ8 0x005820F0
 void SetAutomapToolCursor(int tool)
 {
-    if (g_automap_tool == 0 && g_automap_cursor_inside) {
+    if (g_automap_tool == 0 && ExperimentalModernMapEnabled()) {
+        /* Experimental (experimental.h): a click no longer zooms, so no magnifier; the
+           map's hand while dragging (also outside the field), else the arrow. */
+        if (ModernMapDragging()) {
+            tool = 4;
+        } else if (g_automap_cursor_inside) {
+            tool = 0;
+        }
+    } else if (g_automap_tool == 0 && g_automap_cursor_inside) {
         tool = g_automap_zoom > g_float_twenty_five_thousand ? 1 : 4;
     }
     SetAutomapCursorImage(tool);
@@ -778,6 +787,7 @@ unsigned char AutomapScreenEnter(void)
             item->p3D->DetachMesh(g_world);
     }
     gfTrackMousePos = 1;
+    ModernMapLeave(); /* Experimental (experimental.h): no gesture carried over */
     g_automap_cursor_inside = IsCursorInsideViewport();
     g_automap_tool = 0;
     SetAutomapToolCursor(0);
@@ -944,7 +954,19 @@ void AutomapScreenFrame(void)
             HandleAutomapNoteInput(&input);
             continue;
         }
-        if (HandleAutomapKey(&input))
+        const int tool_before_key = g_automap_tool;
+        if (HandleAutomapKey(&input)) {
+            /* Experimental (experimental.h): the retail key code sets the original magnifier
+               inline (Esc or F1 dropping a tool, Backspace via ResetAutomapZoom, Home);
+               put the map controls' cursor back. */
+            if (ExperimentalModernMapEnabled() &&
+                (input.usParam == VK_BACK || input.usParam == VK_HOME || g_automap_tool != tool_before_key)) {
+                SetAutomapToolCursor(g_automap_tool);
+            }
+            continue;
+        }
+        /* Experimental (experimental.h): wheel zoom and drag. */
+        if (ModernMapHandleEvent(input.usEvent, input.usParam, input.uiParam, input.uiTimeStamp))
             continue;
         if (!IsCursorInsideViewport()) {
             if (g_automap_cursor_inside) {
@@ -1066,24 +1088,28 @@ void AutomapScreenFrame(void)
         }
     }
     bool moved = false;
+    /* Experimental (experimental.h, FrameRateFix): the step per frame scaled to the frame
+       time as at 30 fps; exactly 1 with the switch off. */
+    const float pan_scale = FrameRateAutomapPanScale();
     if (gfKeyState[VK_LEFT]) {
-        g_automap_position.x -= g_float_thirty_five_hundredths * g_automap_zoom;
+        g_automap_position.x -= g_float_thirty_five_hundredths * g_automap_zoom * pan_scale;
         moved = true;
     }
     if (gfKeyState[VK_RIGHT]) {
-        g_automap_position.x += g_float_thirty_five_hundredths * g_automap_zoom;
+        g_automap_position.x += g_float_thirty_five_hundredths * g_automap_zoom * pan_scale;
         moved = true;
     }
     if (gfKeyState[VK_UP]) {
-        g_automap_position.z += g_float_thirty_five_hundredths * g_automap_zoom;
+        g_automap_position.z += g_float_thirty_five_hundredths * g_automap_zoom * pan_scale;
         moved = true;
     }
     if (gfKeyState[VK_DOWN]) {
-        g_automap_position.z -= g_float_thirty_five_hundredths * g_automap_zoom;
+        g_automap_position.z -= g_float_thirty_five_hundredths * g_automap_zoom * pan_scale;
         moved = true;
     }
     if (moved)
         SetAutomapCameraPoint(&g_automap_position);
+    ModernMapFrame(); /* Experimental (experimental.h) */
     if (GetTickCount() - g_automap_state->blink_time > 500) {
         if (g_automap_state->blink_enabled)
             DrawVideoInspector(0xdc, 0x32);
@@ -1117,6 +1143,7 @@ void RestoreAutomapWorldSettings(void)
 // FUNCTION: WIZ8 0x0057efe0
 unsigned char AutomapScreenLeave(int)
 {
+    ModernMapLeave(); /* Experimental (experimental.h): drop live-redraw textures */
     RestoreAutomapWorldSettings();
     free(g_automap_state);
     g_automap_state = 0;
@@ -1370,6 +1397,31 @@ unsigned char ZoomAutomapIn(const srVector3T<float>* point)
     SetAutomapCameraPoint(&position);
     SetAutomapToolCursor(g_automap_tool);
     return 1;
+}
+
+/* Experimental (experimental.h): the ground under a world point, found as ZoomAutomapIn
+   finds it (the highest surface on a vertical line; with no hit the layer-1 plane, else the
+   bottom of the grid). The map controls place the camera the zoom above it. */
+float AutomapGroundAt(float x, float z)
+{
+    srVector3T<float> from;
+    srVector3T<float> to;
+    from.x = x;
+    from.y = g_automap_top_y + g_world_scale;
+    from.z = z;
+    to.x = x;
+    to.y = g_automap_grid_min.y;
+    to.z = z;
+    if (g_octree_game_data != 0 && g_octree_game_data->octree != 0 &&
+        g_octree_game_data->octree->TraceLineOfSight(&from, &to, true, -3, -3, true, 0) != 0) {
+        return to.y;
+    }
+    float ground = g_automap_grid_min.y;
+    if (g_automap_layers.GetCount() != 0 && 1 < g_automap_layers.GetCount() &&
+        *g_automap_layers.GetAt(1) != 0) {
+        ground = static_cast<float>((*g_automap_layers.GetAt(1))->getLocationY());
+    }
+    return ground;
 }
 
 /* Zero every world mesh's vertex-light table and flag it dirty, then clear
@@ -1628,7 +1680,17 @@ void RenderAutomapFrame(void)
             RenderAutomapMarkers();
         } else {
             if (g_automap_overlay_redraw) {
-                SetResidentTexturePolicy(3);
+                /* Experimental (experimental.h): during a map drag or wheel zoom the
+                   world is redrawn every frame; switching the texture policy flushes every
+                   resident texture twice, so live frames only set it (textures keep the
+                   reduction they were made with) and the gesture's end redraws as below. */
+                const bool live = ModernMapLiveRedraw();
+                const int saved_policy = g_resident_texture_policy;
+                if (live) {
+                    g_resident_texture_policy = 3;
+                } else {
+                    SetResidentTexturePolicy(3);
+                }
                 float half = g_automap_zoom * g_float_half;
                 float half_x = AutomapWorldWidth() * g_float_half; /* mod: wider by ox */
                 srCamera::Rect view;
@@ -1644,7 +1706,12 @@ void RenderAutomapFrame(void)
                     RenderWorldToSurface(g_automap_surface, &g_automap_viewport, false);
                 }
                 g_automap_overlay_redraw = false;
-                SetResidentTexturePolicy(0);
+                if (live) {
+                    g_resident_texture_policy = saved_policy;
+                    ModernMapNoteLiveRedraw();
+                } else {
+                    SetResidentTexturePolicy(0);
+                }
             }
             unsigned int pitch;
             if (AutomapWideOx()) {
@@ -1668,6 +1735,12 @@ void RenderAutomapFrame(void)
             RenderAutomapMarkers();
             InvalidateRegion(AutomapViewLeft(), 0x20, AutomapViewRight(), 0x1d3, 0);
             SetRendererAutoFlipEnabled(false);
+            /* Experimental: the frame cap would sleep here and again in the RenderFrame
+               below, halving the rate of a redrawn frame; with the map controls on, only
+               the second one waits. */
+            if (ExperimentalModernMapEnabled()) {
+                CanvasSkipNextFrameLimit();
+            }
             RenderFrame();
             SetRendererAutoFlipEnabled(true);
         }

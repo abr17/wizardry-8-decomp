@@ -15,6 +15,8 @@ extern W8MessageDialogBase* g_main_menu_dialog;
 extern wchar_t* g_pending_main_menu_message;
 
 unsigned char DrawMainMenuItem(short item, short state);
+/* Mod: the game and patch version line in the top-right corner of the canvas. */
+void DrawMainMenuVersionLine(void);
 void SetMainMenuMessage(const wchar_t* message);
 unsigned char MainMenuIntroduction(const InputAtom* event, W8Region* region);
 unsigned char MainMenuNewGame(const InputAtom* event, W8Region* region);

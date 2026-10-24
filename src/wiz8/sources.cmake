@@ -220,6 +220,12 @@ set(WIZ8_SOURCE_UNITS
     src/wiz8/virtual_file_stream.cpp
     src/wiz8/engine_code/trim_string.cpp
     src/wiz8/russian_text.cpp
+    src/wiz8/experimental/MenuAnimation.cpp
+    src/wiz8/experimental/ExperimentalOptions.cpp
+    src/wiz8/experimental/ModernMap.cpp
+    src/wiz8/experimental/OriginalFixes.cpp
+    src/wiz8/experimental/FixedTick.cpp
+    src/wiz8/experimental/FrameRateFixes.cpp
     src/w8diff/w8diff_core.c
     src/w8diff/w8diff_port.cpp
 )

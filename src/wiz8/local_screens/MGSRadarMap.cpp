@@ -33,6 +33,8 @@
 #include "wiz8/video_object_catalog.h"
 #include "wiz8/xstatus.h"
 #include "wiz8/engine_code/GameData.h"
+#include "wiz8/experimental.h"
+#include "vsurface.h" /* Experimental (OriginalFixes): DeleteVideoSurfaceFromIndex */
 
 /* The blip palette, six classes of three distance rings. Items
    take class 4 and missiles class 5; monsters take their disposition-mapped
@@ -274,6 +276,13 @@ void RefreshRadarMap(void)
     g_radar_map = CreateSpriteFromSurface(map_surface, 0, 1, 0, 1);
     Position2DNodeUnsnapped(g_radar_map, 0x1e, 0x167);
     SetModelInstance2DDisplayState(g_radar_map, 4);
+    /* Experimental (experimental.h, OriginalFixes): the sprites copied the pixels; the original
+       never deletes the three surfaces, a leak on every level load and radar show */
+    if (ExperimentalOriginalFixesEnabled()) {
+        DeleteVideoSurfaceFromIndex(compass_surface);
+        DeleteVideoSurfaceFromIndex(frame_surface);
+        DeleteVideoSurfaceFromIndex(map_surface);
+    }
 
     for (sector = 0; sector < 18; ++sector) {
         srVector4T<float> color;

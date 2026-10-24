@@ -33,8 +33,9 @@ extern void* LockPrimarySurfaceFull(unsigned int* pitch);
 extern void UnlockPrimarySurface(void);
 extern void InvalidateCanvas(unsigned int flags);
 
-/* Path to a file next to the exe (name - file name only). */
-static void PathNextToExe(const char* name, char* out, size_t size)
+/* Path to a file next to the exe (name - file name only). Also used by the experimental
+   features' settings (ExperimentalIniPath). */
+void PathNextToExe(const char* name, char* out, size_t size)
 {
     char module[MAX_PATH];
     DWORD length = GetModuleFileNameA(NULL, module, sizeof(module));
@@ -480,6 +481,22 @@ int DisplayMaxFps(void)
     return s_max_fps;
 }
 
+void DisplaySetMaxFps(int fps)
+{
+    if (fps < 0) {
+        fps = 0;
+    } else if (fps > 0 && fps < 30) {
+        fps = 30;
+    }
+    s_max_fps = fps;
+    char ini[MAX_PATH];
+    char value[16];
+    PathNextToExe("wiz8wide.ini", ini, sizeof(ini));
+    _snprintf(value, sizeof(value), "%d", fps);
+    value[sizeof(value) - 1] = '\0';
+    WritePrivateProfileStringA("Display", "MaxFps", value, ini);
+}
+
 /* 0 = not read yet. */
 static float s_view_distance;
 
@@ -537,10 +554,23 @@ bool CanvasTakeScreenshotRequest(void)
     return true;
 }
 
+/* Experimental (experimental.h, ModernMap): a frame the map's live redraw presents in two
+   RenderFrame calls is limited once. */
+static bool s_skip_next_frame_limit;
+
+void CanvasSkipNextFrameLimit(void)
+{
+    s_skip_next_frame_limit = true;
+}
+
 void CanvasLimitFrameRate(void)
 {
     static LARGE_INTEGER frequency;
     static LARGE_INTEGER next_frame;
+    if (s_skip_next_frame_limit) { /* Experimental (ModernMap) */
+        s_skip_next_frame_limit = false;
+        return;
+    }
     const int max_fps = DisplayMaxFps();
     if (max_fps <= 0) {
         return;

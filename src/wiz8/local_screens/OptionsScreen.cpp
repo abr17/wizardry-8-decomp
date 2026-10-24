@@ -39,6 +39,7 @@
 #include "wiz8/text_input.h"
 #include "wiz8/local_code/Strings.h"
 #include "wiz8/canvas.h"
+#include "wiz8/experimental.h"
 #include "wiz8/russian_text.h"
 #include "wiz8/layouts/world.h"
 #include "wiz8/engine_code/3d.h"
@@ -148,6 +149,11 @@ static int g_last_options_panel = 5;
 static unsigned int g_options_menu_region_set;
 // GLOBAL: WIZ8 0x0069c250
 static unsigned int g_options_page_region_set;
+
+/* Mod (2026-10-22): the frame rate page, Video page 3 (panel index 15, after the patch's
+   experimental page 14; the original's region set array has 14 entries, panels 0..13). */
+enum { W8_ORIGINAL_OPTIONS_PANELS = 14, W8_FRAME_RATE_OPTIONS_PANEL = 15, W8_VIDEO_OPTIONS_SELECTION = 2 };
+static unsigned int g_frame_rate_region_set;
 
 // GLOBAL: WIZ8 0x0064d0b8
 static W8OptionsMenuRow g_options_menu_rows[8] = {
@@ -1426,6 +1432,149 @@ void W8OptionsAdvancedGraphicsPanel::Populate()
     AddDisplaySettings(); /* mod: display mode and resolution */
 }
 
+/* ---- Mod (2026-10-22): frame rate limit, Video page 3 ----
+   The patch's own frame cap ([Display] MaxFps, canvas.h): a slider with three stops, 30 / 60 /
+   120 (the number next to it), under it an "Unlimited" toggle (MaxFps=0) like the Audio page's
+   mute toggle under each volume slider. Applied at once and written to wiz8wide.ini. */
+namespace {
+
+const int kFrameRateSteps[3] = {30, 60, 120};
+const wchar_t* const kFrameRateTexts[3] = {L"30", L"60", L"120"};
+
+class W8OptionsFrameRatePanel : public W8OptionsPanel,
+                                public W8HorizontalRangeThumbListener,
+                                public W8TextControl::Listener {
+public:
+    W8OptionsFrameRatePanel()
+        : W8OptionsPanel(W8_FRAME_RATE_OPTIONS_PANEL), m_slider(0), m_unlimited_button(0), m_value_text(0),
+          m_position(1.0f), m_unlimited(0)
+    {
+    }
+    virtual void Populate() override;
+    virtual void OnDrag(W8HorizontalRangeThumb* thumb) override;
+    virtual void OnDragEnd(W8HorizontalRangeThumb* thumb) override;
+    virtual void OnPrimary(W8TextControl* control) override;
+
+private:
+    enum { TEXT_NORMAL = 4 };
+
+    static int NearestStep(float position)
+    {
+        int step = static_cast<int>(position + 0.5f);
+        return step < 0 ? 0 : step > 2 ? 2 : step;
+    }
+    void ShowValue(int step)
+    {
+        m_value_text->SetText(m_unlimited ? L"" : kFrameRateTexts[step], g_options_detail_font);
+        Invalidate(0);
+        /* the panel background covers the page strip: redraw it too, as the keyboard pages do
+           (W8OptionsKeyboardPanel::Invalidate) */
+        g_options_screen->m_menu_set->Invalidate(0);
+    }
+
+    W8OptionsSlider* m_slider;
+    W8TextControl* m_unlimited_button;
+    W8TextBuffer* m_value_text;
+    float m_position; /* slider value: 0, 1 or 2 */
+    int m_unlimited;
+};
+
+void W8OptionsFrameRatePanel::Populate()
+{
+    const int fps = DisplayMaxFps();
+    m_unlimited = fps == 0 ? 1 : 0;
+    /* an ini value between the stops (hand-edited) shows the nearest one until moved */
+    m_position = fps == 0 ? 1.0f : fps <= 45 ? 0.0f : fps <= 90 ? 1.0f : 2.0f;
+
+    m_content_top += 22;
+    const int top = m_content_top;
+    m_slider = AddSliderText(LocalizedOr(L"Frame rate limit", L"Bildratenlimit", L"Limite d'images",
+                                         L"Частота кадров"),
+                             &m_position);
+    m_slider->m_minimumPosition = 0.0f;
+    m_slider->m_maximumPosition = 2.0f;
+    m_slider->UpdatePixelPosition();
+    m_slider->m_listener = this;
+    m_slider->SetEnabled(!m_unlimited);
+    /* the number just left of the slider, at the same (right) edge */
+    W8ControlsRect bounds = {m_bounds.left + 20, m_bounds.top + top, m_bounds.left + 0xc9 - 8,
+                             m_bounds.top + top + 22};
+    m_value_text = new W8TextBuffer(&bounds, const_cast<wchar_t*>(L""), g_options_detail_font,
+                                    g_W8TextBufferAlignTop | g_W8TextBufferAlignRight, TEXT_NORMAL);
+    m_text_buffers.Add(m_value_text);
+    if (m_unlimited) {
+        m_value_text->SetText(L"", g_options_detail_font);
+    } else {
+        /* the rate in force, also a hand-edited one between the stops (until moved) */
+        wchar_t digits[8];
+        wchar_t text[8];
+        int count = 0;
+        int value = fps;
+        do {
+            digits[count++] = static_cast<wchar_t>(L'0' + value % 10);
+            value /= 10;
+        } while (value > 0 && count < 7);
+        int length = 0;
+        while (count > 0) {
+            text[length++] = digits[--count];
+        }
+        text[length] = L'\0';
+        m_value_text->SetText(text, g_options_detail_font);
+    }
+
+    /* "Unlimited" right under the slider, as the Audio page's mute toggle (AddChoiceButton) */
+    m_unlimited_button =
+        AddChoiceButtonText(LocalizedOr(L"Unlimited", L"Unbegrenzt", L"Illimit\x00e9", L"Без ограничения"));
+    m_unlimited_button->m_listener = this;
+    if (m_unlimited) {
+        m_unlimited_button->EnableSecondaryState(false);
+    }
+}
+
+void W8OptionsFrameRatePanel::OnDrag(W8HorizontalRangeThumb* thumb)
+{
+    if (thumb == m_slider) {
+        ShowValue(NearestStep(m_slider->m_position));
+    }
+}
+
+void W8OptionsFrameRatePanel::OnDragEnd(W8HorizontalRangeThumb* thumb)
+{
+    if (thumb != m_slider) {
+        return;
+    }
+    /* snap to the stop (a click on the track without dragging also lands here) */
+    const int step = NearestStep(m_slider->m_position);
+    m_position = static_cast<float>(step);
+    m_slider->m_position = m_position;
+    m_slider->UpdatePixelPosition();
+    m_slider->Invalidate(false);
+    ShowValue(step);
+    DisplaySetMaxFps(kFrameRateSteps[step]);
+}
+
+void W8OptionsFrameRatePanel::OnPrimary(W8TextControl* control)
+{
+    if (control != m_unlimited_button) {
+        return;
+    }
+    const bool unlimited =
+        (static_cast<unsigned char>(control->m_stateFlags) & g_W8TextControlStateSecondary) != 0;
+    m_unlimited = unlimited ? 1 : 0;
+    m_slider->SetEnabled(!unlimited);
+    m_slider->Invalidate(false);
+    const int step = NearestStep(m_position);
+    ShowValue(step);
+    DisplaySetMaxFps(unlimited ? 0 : kFrameRateSteps[step]);
+}
+
+W8OptionsPanel* CreateFrameRateOptionsPanel(void)
+{
+    return new W8OptionsFrameRatePanel();
+}
+
+} // namespace
+
 // FUNCTION: WIZ8 0x005a9ea0
 void W8OptionsUnavailablePanel::Populate()
 {
@@ -1457,12 +1606,15 @@ W8OptionsScreen::W8OptionsScreen()
 // FUNCTION: WIZ8 0x005a98b0
 void W8OptionsScreen::CreateControls()
 {
+    /* Experimental (experimental.h): the column art with the new category. */
+    ExperimentalOptionsPrepareArt();
     m_controls = new Controls();
     m_menu_selection = new W8ControlSelection();
     m_controls->AcquireRegionSet(&g_options_menu_region_set);
     for (int index = 0; index < 8; ++index) {
-        W8OptionsMenuButton* button =
-            new W8OptionsMenuButton(m_controls, &g_options_menu_rows[index]);
+        /* Experimental (experimental.h): the row, moved up for the 5th category button. */
+        W8OptionsMenuButton* button = new W8OptionsMenuButton(
+            m_controls, ExperimentalOptionsRow(index, &g_options_menu_rows[index]));
         if (index == 7) {
             button->m_primaryActivationCallback = RequestScreenTransition;
         } else if (index == 6) {
@@ -1476,6 +1628,8 @@ void W8OptionsScreen::CreateControls()
             }
         }
     }
+    /* Experimental (experimental.h): the category's entry, selection index 6. */
+    ExperimentalOptionsAddEntry(m_controls, m_menu_selection);
     m_menu_selection->m_selectionListener = this;
     m_controls->SetEnabled(true);
     m_controls->EnableRegionSet(true);
@@ -1532,12 +1686,26 @@ void W8OptionsScreen::SelectPanel(int selected, bool notify)
         if (m_panel[selected] == 0) {
             m_panel[selected] = new W8OptionsPanelSet();
             W8OptionsPanelSet* created = m_panel[m_selected_panel];
-            for (int index = g_options_panel_ranges[m_selected_panel].first;
-                 index <= g_options_panel_ranges[m_selected_panel].last; ++index) {
-                W8OptionsPanel* panel = CreateOptionsPanel(index, &created->m_compact_layout,
-                                                           &created->m_hide_navigation);
+            if (m_selected_panel == W8_EXPERIMENTAL_OPTIONS_SELECTION) {
+                /* Experimental (experimental.h): one page; the original's range table has
+                   {0, 0} here and CreateOptionsPanel knows no panel 14. */
+                W8OptionsPanel* panel = ExperimentalOptionsCreatePanel();
                 panel->Populate();
                 created->m_panels.Add(panel);
+            } else {
+                for (int index = g_options_panel_ranges[m_selected_panel].first;
+                     index <= g_options_panel_ranges[m_selected_panel].last; ++index) {
+                    W8OptionsPanel* panel = CreateOptionsPanel(index, &created->m_compact_layout,
+                                                               &created->m_hide_navigation);
+                    panel->Populate();
+                    created->m_panels.Add(panel);
+                }
+                if (m_selected_panel == W8_VIDEO_OPTIONS_SELECTION) {
+                    /* mod: Video page 3, the frame rate limit */
+                    W8OptionsPanel* panel = CreateFrameRateOptionsPanel();
+                    panel->Populate();
+                    created->m_panels.Add(panel);
+                }
             }
         }
         W8OptionsPanelSet* current = m_panel[m_selected_panel];
@@ -2624,7 +2792,11 @@ void W8OptionsMenuSet::Redraw()
 W8OptionsPanel::W8OptionsPanel(int region_index)
     : Controls(0x104, 0, 0, 0, 0xee, 0, 1), m_current(0), m_content_top(0x18)
 {
-    AcquireRegionSet(g_options_panel_region_sets + region_index);
+    /* Experimental (experimental.h): panel 14 has its own region set (the array has 14);
+       mod: so has the frame rate page, 15. */
+    AcquireRegionSet(region_index < W8_ORIGINAL_OPTIONS_PANELS ? g_options_panel_region_sets + region_index
+                     : region_index == W8_FRAME_RATE_OPTIONS_PANEL ? &g_frame_rate_region_set
+                                                                   : ExperimentalOptionsRegionSet());
 
     short width;
     short height;

@@ -4,6 +4,7 @@
 #include "wiz8/video_object_catalog.h"
 #include "wiz8/utility.h"
 #include "wiz8/canvas.h"
+#include "wiz8/experimental.h"
 #include "wiz8/wide_art.h"
 
 #include <stdlib.h>
@@ -770,6 +771,13 @@ W8VideoObjectSlot g_video_slots[W8_VIDEO_SLOT_COUNT] = {
 static bool DrawCatalogSurfaceWide(UINT32 target, unsigned int surface, int left, int top,
                                    UINT32 mode, const char* path)
 {
+    /* Experimental (experimental.h): the animated main menu draws its current frame instead
+       of the static background, at every canvas width. */
+    if (target == FRAME_BUFFER && left == 0 && top == 0 &&
+        (mode & (VS_BLT_SRCREGION | VS_BLT_SRCSUBRECT | VS_BLT_DESTREGION)) == 0 &&
+        MenuAnimationDrawBackground(path)) {
+        return true;
+    }
     if (g_canvas_ox <= 0 || target != FRAME_BUFFER || left != 0 || top != 0 ||
         CanvasDrawOrigin() != g_canvas_ox) {
         return false;

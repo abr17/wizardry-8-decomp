@@ -35,6 +35,7 @@
 #include <string.h>
 
 #include "wiz8/canvas.h"
+#include "wiz8/experimental.h"
 #include "wiz8/wide_art.h"
 
 #ifndef WIZ8WIDE_VERSION
@@ -114,6 +115,13 @@ unsigned char DrawMainMenuItem(short item, short state)
         return 0;
     }
 
+    /* Experimental (experimental.h): over the animated background the item is drawn
+       without its baked-in background. */
+    if (MenuAnimationDrawItem(slot, state, top)) {
+        InvalidateRegion(0x98, top, 0x1f2, bottom, 0);
+        return 1;
+    }
+
     /* Mod (2026-10-12): the menu item images (Data\Options\introtext_*.sti) in
        the original are opaque strips with a baked-in piece of the menu background; on the new
        wide background they show up as rectangles. The patch puts versions with a
@@ -176,15 +184,37 @@ unsigned char MainMenuScreenInitialize(void)
     return 1;
 }
 
-// FUNCTION: WIZ8 0x005bc810
-unsigned char MainMenuScreenEnter(void)
+/* The version line in the top-right corner, as the original's MainMenuScreenEnter draws it;
+   also redrawn by the experimental animated menu (MenuAnimation.cpp) over each frame. */
+void DrawMainMenuVersionLine(void)
 {
     char text[64];
     wchar_t wide[64];
+    FormatVersionBanner(text, false, false, false);
+    /* Mod: the widescreen patch version after the game's: "v1.2.4 (Widescreen v1.0.1)" */
+    if (WIZ8WIDE_VERSION[0] != '\0') {
+        strcat(text, " (Widescreen v" WIZ8WIDE_VERSION ")");
+    }
+    wcscpy(wide, ConvertStringToWide(text));
+    SetFont(g_wiz_text_font_secondary);
+    SetFontObjectPalette16BPP(g_wiz_text_font_secondary,
+                              g_font_state_palettes[W8_FONT_PALETTE_WHITE]);
+    short measured = StringPixLength(wide, g_wiz_text_font_secondary);
+    {
+        /* Mod (wide canvas): the version in the top-right corner of the whole canvas, not
+           of the 640 window (window origin shifted by 2*ox: game x 640 = right edge). */
+        CanvasOriginScope corner_scope(2 * g_canvas_ox);
+        gprintf(0x27b - measured, 5, wide);
+    }
+    SetFontObjectPalette16BPP(g_wiz_text_font_secondary, g_wiz_text_font_secondary_palette);
+}
+
+// FUNCTION: WIZ8 0x005bc810
+unsigned char MainMenuScreenEnter(void)
+{
     unsigned short colour;
     W8MessageDialogBase* dialog;
     wchar_t* pending;
-    short measured;
 
     ResetVideoFrameState();
     MSYS_Init();
@@ -196,6 +226,9 @@ unsigned char MainMenuScreenEnter(void)
     ColorFillVideoSurfaceArea(FRAME_BUFFER, 0, 0, 0x280, 0x1e0, colour);
     SetViewport(0, 0, 0x280, 0x1e0);
     g_main_menu_selected_item = 0;
+    /* Experimental (experimental.h): the animated background, if switched on; the
+       background below is then drawn as its current frame. */
+    MenuAnimationStart();
     /* Wide canvas: if Data\Options\intro_bg_text_<W>.sti exists, DrawCatalogImage
        draws it over the whole canvas itself (the common wide_art.h mechanism). */
     DrawCatalogImage(FRAME_BUFFER, 0xe8, 0, 0, 0, 0, VO_BLT_SRCTRANSPARENCY, 0);
@@ -208,23 +241,7 @@ unsigned char MainMenuScreenEnter(void)
     DrawMainMenuItem(5, 0);
     DrawMainMenuItem(g_main_menu_selected_item, 1);
 
-    FormatVersionBanner(text, false, false, false);
-    /* Mod: the widescreen patch version after the game's: "v1.2.4 (Widescreen v1.0.1)" */
-    if (WIZ8WIDE_VERSION[0] != '\0') {
-        strcat(text, " (Widescreen v" WIZ8WIDE_VERSION ")");
-    }
-    wcscpy(wide, ConvertStringToWide(text));
-    SetFont(g_wiz_text_font_secondary);
-    SetFontObjectPalette16BPP(g_wiz_text_font_secondary,
-                              g_font_state_palettes[W8_FONT_PALETTE_WHITE]);
-    measured = StringPixLength(wide, g_wiz_text_font_secondary);
-    {
-        /* Mod (wide canvas): the version in the top-right corner of the whole canvas, not
-           of the 640 window (window origin shifted by 2*ox: game x 640 = right edge). */
-        CanvasOriginScope corner_scope(2 * g_canvas_ox);
-        gprintf(0x27b - measured, 5, wide);
-    }
-    SetFontObjectPalette16BPP(g_wiz_text_font_secondary, g_wiz_text_font_secondary_palette);
+    DrawMainMenuVersionLine();
     ResetRegions();
     RegionSetEnable(1);
 
@@ -410,6 +427,7 @@ void MainMenuScreenFrame()
 // FUNCTION: WIZ8 0x00591870
 unsigned char MainMenuScreenLeave(int)
 {
+    MenuAnimationStop(); /* Experimental (experimental.h) */
     /* Mod (wide canvas): the wide menu background (wide_art.h) also lies in the side
        strips. Erase them and re-upload the whole canvas so that the next screen
        (party creation, loading, options, credits) gets black strips.

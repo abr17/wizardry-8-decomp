@@ -26,6 +26,8 @@
 #include "timer.h"
 #include "wiz8/local_screens/MGSTextBox.h"
 
+#include "wiz8/experimental.h"
+#include "vsurface.h" /* Experimental (OriginalFixes): DeleteVideoSurfaceFromIndex */
 #include <string.h>
 
 /* On-board (left, top) of each of the fifteen cell markers,
@@ -130,6 +132,12 @@ void RefreshFormationBoard(void)
     g_level_block->formation_board_sprite = CreateSpriteFromSurface(board_image, 0, 1, 0, 1);
     Position2DNodeUnsnapped(g_level_block->formation_board_sprite, 0x207, 0x167);
     SetModelInstance2DDisplayState(g_level_block->formation_board_sprite, 4);
+    /* Experimental (experimental.h, OriginalFixes): the sprites copied the pixels; the original
+       never deletes the two surfaces, a leak on every level load and board refresh */
+    if (ExperimentalOriginalFixesEnabled()) {
+        DeleteVideoSurfaceFromIndex(compass_image);
+        DeleteVideoSurfaceFromIndex(board_image);
+    }
     UpdateFormationCompass();
 }
 

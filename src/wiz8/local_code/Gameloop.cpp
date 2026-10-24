@@ -39,6 +39,7 @@
 #include "wiz8/monster_generators.h"
 #include "wiz8/regions.h"
 #include "wiz8/wide_art.h"
+#include "wiz8/experimental.h"
 #include "Button System.h"
 #include "LibraryDataBase.h"
 #include <stdlib.h>
@@ -187,6 +188,10 @@ void GameLoop(void)
     if (state == W8_SCREEN_NONE) {
         gfProgramIsRunning = 0;
         return;
+    }
+    /* Experimental (experimental.h): the animated main menu background. */
+    if (state == W8_SCREEN_MAIN_MENU) {
+        MenuAnimationTick();
     }
     /* Mod: stone wings at the sides of interface windows (wide_art.h). */
     UpdateWideSideWings(state);
